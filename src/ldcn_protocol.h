@@ -15,6 +15,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <stddef.h>
 
 /* Protocol Constants */
 #define LDCN_HEADER             0xAA

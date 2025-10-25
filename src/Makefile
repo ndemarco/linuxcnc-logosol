@@ -1,14 +1,15 @@
 # Makefile for LinuxCNC Logosol LDCN Driver
 
 # Detect LinuxCNC installation
-LINUXCNC_DIR := $(shell linuxcnc -print-path 2>/dev/null || echo /usr)
+LINUXCNC_DIR := /usr
 HAL_INCLUDE := $(LINUXCNC_DIR)/include/linuxcnc
 
 # Compiler and flags
 CC := gcc
 CFLAGS := -Wall -Wextra -O2 -g
 CFLAGS += -I$(HAL_INCLUDE) -I.
-LDFLAGS := -lm
+CFLAGS += -DULAPI
+LDFLAGS := -llinuxcnchal -lm
 
 # Target binary
 TARGET := ldcn
