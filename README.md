@@ -8,6 +8,10 @@ This LinuxCNC HAL component provides an interface to Logosol Distributed Control
 - **High-Speed Communication**: Operates at 125kbps for fast, responsive control
 - **Power Monitoring**: Detects machine power-on state from I/O controller
 - **Drive Control**: Enable/disable servo amplifiers from LinuxCNC
+- **Emergency Stop**: Dedicated E-stop input immediately disables all servos
+- **Fault Detection**: Monitors servos for checksum errors, current limit, and position errors
+- **Watchdog Timer**: Auto-disables servos on communication timeout (configurable)
+- **Auto-Safety Disable**: Automatically disables on power loss or fault conditions
 - **Robust Error Handling**: Monitors communication status and reports errors
 - **Diagnostic Utilities**: Comprehensive tools for troubleshooting and testing
 
@@ -73,16 +77,30 @@ loadrt ldcn port=/dev/ttyUSB0 num_servos=5
 # Add to servo thread
 addf ldcn.read servo-thread
 
+# Configure watchdog timeout (optional, default is 1.0 second)
+setp ldcn.watchdog-timeout 0.5
+
 # Connect power status
 net machine-power ldcn.power-on => halui.machine.on
 
+# Connect emergency stop
+net estop-out iocontrol.0.user-enable-out => ldcn.estop
+
 # Connect enable signal
 net machine-enabled motion.motion-enabled => ldcn.enable-request
+
+# Connect fault signals
+net ldcn-fault ldcn.fault => halui.estop.is-activated
 
 # Connect per-axis enables (example for X, Y, Z)
 net xen ldcn.servo.0.enabled => axis.0.amp-enable-out
 net yen ldcn.servo.1.enabled => axis.1.amp-enable-out
 net zen ldcn.servo.2.enabled => axis.2.amp-enable-out
+
+# Optional: Monitor individual servo faults
+net x-fault ldcn.servo.0.fault => halui.estop.is-activated
+net y-fault ldcn.servo.1.fault => halui.estop.is-activated
+net z-fault ldcn.servo.2.fault => halui.estop.is-activated
 ```
 
 ## HAL Interface
@@ -93,8 +111,11 @@ net zen ldcn.servo.2.enabled => axis.2.amp-enable-out
 |----------|------|-----------|-------------|
 | `ldcn.power-on` | bit | OUT | TRUE when machine power is on |
 | `ldcn.comms-ok` | bit | OUT | TRUE when LDCN communication is working |
+| `ldcn.fault` | bit | OUT | TRUE when any servo has a fault |
 | `ldcn.enable-request` | bit | IN | Request to enable servo amplifiers |
+| `ldcn.estop` | bit | IN | Emergency stop input (TRUE = stop all servos) |
 | `ldcn.servo.N.enabled` | bit | OUT | Servo N amplifier is enabled (N=0-4) |
+| `ldcn.servo.N.fault` | bit | OUT | Servo N has a fault condition (N=0-4) |
 
 ### Parameters
 
@@ -102,6 +123,7 @@ net zen ldcn.servo.2.enabled => axis.2.amp-enable-out
 |----------------|------|--------|-------------|
 | `ldcn.baud-rate` | u32 | RO | Current baud rate |
 | `ldcn.comm-errors` | u32 | RO | Communication error count |
+| `ldcn.watchdog-timeout` | float | RW | Watchdog timeout in seconds (default: 1.0) |
 
 ### Module Parameters
 
@@ -110,6 +132,63 @@ net zen ldcn.servo.2.enabled => axis.2.amp-enable-out
 | `port` | /dev/ttyUSB0 | Serial port device |
 | `num_servos` | 5 | Number of servo drives (1-5) |
 | `target_baud` | 125000 | Target baud rate |
+
+## Safety Features
+
+The LDCN HAL component includes multiple layers of safety protection:
+
+### Emergency Stop
+
+- **Dedicated E-stop Pin**: `ldcn.estop` input immediately disables all servos when asserted
+- **Hardware-level Stop**: Sends LDCN stop command with amplifiers disabled and motors off
+- **Fast Response**: E-stop is checked first in every servo thread cycle
+- **Usage**: Connect to your machine's E-stop chain:
+  ```hal
+  net estop-out iocontrol.0.user-enable-out => ldcn.estop
+  ```
+
+### Fault Detection
+
+The component continuously monitors each servo for fault conditions:
+- **Checksum Errors**: Communication data integrity problems
+- **Current Limit**: Motor drawing excessive current
+- **Position Error**: Following error exceeded
+
+Faults are reported via:
+- `ldcn.fault` - Global fault indicator (any servo)
+- `ldcn.servo.N.fault` - Per-servo fault status
+
+**Fault Response**: Servos are automatically disabled when faults are detected.
+
+### Watchdog Timer
+
+- **Purpose**: Protects against HAL thread failures or communication freezes
+- **Default**: 1.0 second timeout
+- **Configurable**: Adjust via `ldcn.watchdog-timeout` parameter
+- **Action**: Automatically disables all servos if no successful communication within timeout period
+- **Disable**: Set to 0 to disable watchdog (not recommended)
+
+Example configuration:
+```hal
+setp ldcn.watchdog-timeout 0.5  # 500ms timeout for faster response
+```
+
+### Automatic Safety Disables
+
+Servos are automatically disabled when:
+1. **Power Loss**: Machine power-on signal from I/O controller goes FALSE
+2. **Fault Conditions**: Any servo reports a fault
+3. **Communication Failure**: Watchdog timer expires
+4. **E-stop Activation**: Emergency stop input is asserted
+
+### Safe Enable Logic
+
+Servos can only be enabled when ALL of the following are TRUE:
+- Machine power is on (`ldcn.power-on` = TRUE)
+- No faults detected (`ldcn.fault` = FALSE)
+- E-stop not active (`ldcn.estop` = FALSE)
+- Communication healthy (`ldcn.comms-ok` = TRUE)
+- Enable requested (`ldcn.enable-request` = TRUE)
 
 ## Utilities
 
@@ -141,10 +220,23 @@ Options:
   --port PORT       Serial port (default: /dev/ttyUSB0)
   --verbose         Show detailed communication
   --test-power      Test power-on detection
+  --test-faults     Continuously monitor servos for faults
 
-Example:
+Examples:
+  # Basic diagnostic test
+  ./utils/ldcn_diagnostic.py --port /dev/ttyUSB0
+
+  # Test power-on detection
   ./utils/ldcn_diagnostic.py --port /dev/ttyUSB0 --test-power
+
+  # Monitor for faults (checksum errors, current limit, position errors)
+  ./utils/ldcn_diagnostic.py --port /dev/ttyUSB0 --test-faults
 ```
+
+The fault monitoring feature continuously checks all servos and reports:
+- **Checksum Errors**: Communication data corruption
+- **Current Limit**: Motor drawing excessive current (binding, overload)
+- **Position Error**: Servo cannot maintain position (mechanical issue, tuning)
 
 ### ldcn_monitor.py - Status Monitor
 

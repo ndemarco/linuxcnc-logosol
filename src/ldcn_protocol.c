@@ -225,17 +225,21 @@ ldcn_network_t *ldcn_open(const char *port, int baud_rate)
     if (!net) {
         return NULL;
     }
-    
+
     net->fd = ldcn_open_serial(port, baud_rate);
     if (net->fd < 0) {
         free(net);
         return NULL;
     }
-    
+
     net->baud_rate = baud_rate;
     net->num_devices = 0;
     net->comm_errors = 0;
-    
+
+    /* Store port name for later use */
+    strncpy(net->port_name, port, sizeof(net->port_name) - 1);
+    net->port_name[sizeof(net->port_name) - 1] = '\0';
+
     /* Initialize devices */
     for (int i = 0; i < LDCN_MAX_DEVICES; i++) {
         net->devices[i].address = 0;
@@ -243,9 +247,9 @@ ldcn_network_t *ldcn_open(const char *port, int baud_rate)
         net->devices[i].device_type = LDCN_DEVICE_SERVO;
         net->devices[i].responding = false;
     }
-    
+
     usleep(200000); /* 200ms settle time */
-    
+
     return net;
 }
 
@@ -424,19 +428,19 @@ int ldcn_set_baud_rate(ldcn_network_t *net, int new_baud)
     }
     
     usleep(500000); /* 500ms for baud rate change */
-    
+
     /* Close and reopen at new baud rate */
     close(net->fd);
     usleep(500000);
-    
-    net->fd = ldcn_open_serial("/dev/ttyUSB0", new_baud); /* TODO: store port name */
+
+    net->fd = ldcn_open_serial(net->port_name, new_baud);
     if (net->fd < 0) {
         return LDCN_ERR_OPEN_FAILED;
     }
-    
+
     net->baud_rate = new_baud;
     usleep(500000);
-    
+
     return LDCN_OK;
 }
 
@@ -537,13 +541,13 @@ int ldcn_verify_devices(ldcn_network_t *net)
     if (!net) {
         return LDCN_ERR_INVALID_PARAM;
     }
-    
+
     int responding = 0;
-    
+
     for (int i = 0; i < net->num_devices; i++) {
         uint8_t status;
         int ret = ldcn_read_status(net, net->devices[i].address, &status);
-        
+
         if (ret == LDCN_OK) {
             net->devices[i].responding = true;
             responding++;
@@ -551,6 +555,79 @@ int ldcn_verify_devices(ldcn_network_t *net)
             net->devices[i].responding = false;
         }
     }
-    
+
     return responding;
+}
+
+/**
+ * ldcn_emergency_stop - Immediately stop all servo motors
+ */
+int ldcn_emergency_stop(ldcn_network_t *net)
+{
+    if (!net) {
+        return LDCN_ERR_INVALID_PARAM;
+    }
+
+    /* Send emergency stop to all servos using group address */
+    /* Stop abruptly with amplifiers disabled and motors off */
+    uint8_t mode = LDCN_STOP_ABRUPTLY | LDCN_STOP_MOTOR_OFF;
+
+    int ret = ldcn_stop_motor(net, LDCN_ADDR_GROUP_ALL, mode);
+
+    /* Also disable each individual servo to ensure they're all off */
+    for (int i = 0; i < net->num_devices; i++) {
+        if (net->devices[i].device_type == LDCN_DEVICE_SERVO) {
+            ldcn_enable_amplifier(net, net->devices[i].address, false);
+        }
+    }
+
+    return ret;
+}
+
+/**
+ * ldcn_check_faults - Check for fault conditions on a device
+ */
+int ldcn_check_faults(ldcn_network_t *net, uint8_t address, uint8_t *faults)
+{
+    if (!net || !faults) {
+        return LDCN_ERR_INVALID_PARAM;
+    }
+
+    uint8_t status;
+    int ret = ldcn_read_status(net, address, &status);
+
+    if (ret != LDCN_OK) {
+        return ret;
+    }
+
+    *faults = 0;
+    int fault_count = 0;
+
+    /* Check for checksum error */
+    if (status & LDCN_STATUS_CKSUM_ERROR) {
+        *faults |= LDCN_STATUS_CKSUM_ERROR;
+        fault_count++;
+    }
+
+    /* Check for current limit */
+    if (status & LDCN_STATUS_CURRENT_LIMIT) {
+        *faults |= LDCN_STATUS_CURRENT_LIMIT;
+        fault_count++;
+    }
+
+    /* Check for position error */
+    if (status & LDCN_STATUS_POS_ERROR) {
+        *faults |= LDCN_STATUS_POS_ERROR;
+        fault_count++;
+    }
+
+    /* Update device status */
+    for (int i = 0; i < net->num_devices; i++) {
+        if (net->devices[i].address == address) {
+            net->devices[i].status = status;
+            break;
+        }
+    }
+
+    return fault_count;
 }

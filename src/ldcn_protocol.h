@@ -127,6 +127,7 @@ typedef struct {
 typedef struct {
     int fd;                                /* Serial port file descriptor */
     int baud_rate;                         /* Current baud rate */
+    char port_name[256];                   /* Serial port device name */
     ldcn_device_t devices[LDCN_MAX_DEVICES]; /* Device array */
     int num_devices;                       /* Number of addressed devices */
     int comm_errors;                       /* Communication error count */
@@ -261,9 +262,35 @@ int ldcn_get_brd_for_baud(int baud_rate);
  * ldcn_calculate_checksum - Calculate LDCN checksum
  * @data: Data bytes (excluding header)
  * @len: Length of data
- * 
+ *
  * Returns: Checksum byte
  */
 uint8_t ldcn_calculate_checksum(const uint8_t *data, int len);
+
+/**
+ * ldcn_emergency_stop - Immediately stop all servo motors
+ * @net: Network structure
+ *
+ * Sends emergency stop command to all servo drives simultaneously.
+ * This disables all amplifiers and stops all motion abruptly.
+ *
+ * Returns: LDCN_OK on success, error code on failure
+ */
+int ldcn_emergency_stop(ldcn_network_t *net);
+
+/**
+ * ldcn_check_faults - Check for fault conditions on a device
+ * @net: Network structure
+ * @address: Device address
+ * @faults: Pointer to store fault flags (bitwise OR of detected faults)
+ *
+ * Reads device status and checks for fault conditions:
+ * - LDCN_STATUS_CKSUM_ERROR: Checksum error
+ * - LDCN_STATUS_CURRENT_LIMIT: Current limit reached
+ * - LDCN_STATUS_POS_ERROR: Position error exceeded
+ *
+ * Returns: Number of faults detected, or error code (<0) on communication failure
+ */
+int ldcn_check_faults(ldcn_network_t *net, uint8_t address, uint8_t *faults);
 
 #endif /* LDCN_PROTOCOL_H */
