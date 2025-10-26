@@ -19,3 +19,6 @@ test_serial
 # OS files
 .DS_Store
 Thumbs.db
+
+# Vendor documentation (large PDFs)
+docs/logosol/
