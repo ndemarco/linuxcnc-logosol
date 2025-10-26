@@ -1,0 +1,50 @@
+# Example HAL Configuration for Logosol LDCN Servo Drives
+# 3-axis XYZ machine with LS-231SE drives
+
+# Load the LDCN userspace component
+loadusr -W ldcn port=/dev/ttyUSB0 baud=115200 axes=3 servo_rate=20
+
+# Set per-axis parameters
+# Scale: encoder counts per machine unit
+setp ldcn.0.scale 400.0
+setp ldcn.0.kp 50
+setp ldcn.0.kd 8000
+setp ldcn.0.ki 50
+
+setp ldcn.1.scale 400.0
+setp ldcn.1.kp 50
+setp ldcn.1.kd 8000
+setp ldcn.1.ki 50
+
+setp ldcn.2.scale 800.0
+setp ldcn.2.kp 80
+setp ldcn.2.kd 10000
+setp ldcn.2.ki 60
+
+# Connect Joints to LDCN Drives
+
+# Joint 0 (X-axis)
+net x-enable joint.0.amp-enable-out => ldcn.0.enable
+net x-pos-cmd joint.0.motor-pos-cmd => ldcn.0.position-cmd
+net x-pos-fb ldcn.0.position-fb => joint.0.motor-pos-fb
+net x-vel-cmd joint.0.vel-cmd => ldcn.0.velocity-cmd
+net x-home-sw ldcn.0.is-homed => joint.0.home-sw-in
+
+# Joint 1 (Y-axis)
+net y-enable joint.1.amp-enable-out => ldcn.1.enable
+net y-pos-cmd joint.1.motor-pos-cmd => ldcn.1.position-cmd
+net y-pos-fb ldcn.1.position-fb => joint.1.motor-pos-fb
+net y-vel-cmd joint.1.vel-cmd => ldcn.1.velocity-cmd
+net y-home-sw ldcn.1.is-homed => joint.1.home-sw-in
+
+# Joint 2 (Z-axis)
+net z-enable joint.2.amp-enable-out => ldcn.2.enable
+net z-pos-cmd joint.2.motor-pos-cmd => ldcn.2.position-cmd
+net z-pos-fb ldcn.2.position-fb => joint.2.motor-pos-fb
+net z-vel-cmd joint.2.vel-cmd => ldcn.2.velocity-cmd
+net z-home-sw ldcn.2.is-homed => joint.2.home-sw-in
+
+# Fault Handling
+net x-fault ldcn.0.fault
+net y-fault ldcn.1.fault
+net z-fault ldcn.2.fault
