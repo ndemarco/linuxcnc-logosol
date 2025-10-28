@@ -906,9 +906,10 @@ int main(int argc, char **argv) {
         }
     }
 
-    /* Phase 3: Discover devices on network */
+    /* Phase 3: Discover devices on network (skip after reset - devices at address 0) */
     int num_devices = TOTAL_LDCN_DEVICES;  /* Default assumption */
-    if (hal_data->do_discover || hal_data->do_full_init) {
+    if (hal_data->do_discover && !hal_data->do_full_init) {
+        /* Discovery only works if devices already have addresses */
         num_devices = discover_devices(hal_data->port, TOTAL_LDCN_DEVICES);
         if (num_devices < 0) {
             rtapi_print_msg(RTAPI_MSG_ERR, "%s: ERROR: Device discovery failed\n", COMP_NAME);

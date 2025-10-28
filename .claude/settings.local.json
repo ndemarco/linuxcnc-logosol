@@ -36,7 +36,9 @@
       "Bash(gcc:*)",
       "Bash(./test_serial_c:*)",
       "Bash(strace:*)",
-      "Read(//tmp/**)"
+      "Read(//tmp/**)",
+      "Read(//sys/devices/pci0000:00/0000:00:14.0/usb3/3-5/3-5:1.0/ttyUSB0/**)",
+      "Bash(tee:*)"
     ],
     "deny": [],
     "ask": []
