@@ -1,0 +1,11 @@
+{
+    "permissions": {
+        "allow": [
+            "WebFetch(linuxcnc.org)",
+            "WebFetch(forum.linuxcnc.org)",
+            "WebFetch(github.com)",
+            "WebFetch(docs.linuxcnc.org)",
+            "WebFetch(logosolinc.com)"
+        ]
+    }
+}

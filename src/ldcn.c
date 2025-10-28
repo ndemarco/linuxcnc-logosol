@@ -31,10 +31,12 @@
 
 /* Default values */
 #define DEFAULT_PORT "/dev/ttyUSB0"
-#define DEFAULT_BAUD 115200
+#define DEFAULT_BAUD 125000  /* Target baud rate */
 #define DEFAULT_AXES 3
 #define DEFAULT_SERVO_RATE 20  /* ~1ms update rate */
 #define DEFAULT_PATH_BUFFER_FREQ 100  /* 5.12ms per point */
+#define SUPERVISOR_ADDR 6  /* LS-2310g2 supervisor address */
+#define TOTAL_LDCN_DEVICES 6  /* 5 servos + 1 supervisor */
 
 /* Per-Axis HAL Data */
 typedef struct {
@@ -73,18 +75,29 @@ typedef struct {
     int num_axes;
     axis_data_t *axes;
     ldcn_serial_port_t *port;
-    
+
     /* Configuration */
     char port_name[256];
     int baud_rate;
     uint8_t servo_rate_divisor;
     bool path_mode;
     uint16_t path_buffer_freq;
-    
+
+    /* Initialization phase control */
+    bool do_detect_baud;
+    bool do_reset;
+    bool do_discover;
+    bool do_assign;
+    bool do_upgrade_baud;
+    bool do_configure_supervisor;
+    bool do_wait_power;
+    bool do_init_servos;
+    bool do_full_init;  /* Run all phases */
+
     /* Runtime state */
     bool running;
     int comp_id;
-    
+
 } hal_data_t;
 
 static hal_data_t *hal_data = NULL;
@@ -93,6 +106,306 @@ static volatile sig_atomic_t done = 0;
 /* Signal handler */
 static void quit(int sig) {
     done = 1;
+}
+
+/*
+ * LDCN Network Initialization Functions
+ *
+ * Based on working Python implementation (ldcn_initialization_test.py)
+ * Sequence: auto-detect → reset → address → upgrade → supervisor → power → servos
+ */
+
+/* Try to communicate at a specific baud rate */
+static int try_baud_rate(const char *port_name, int baud) {
+    ldcn_serial_port_t *port;
+    ldcn_cmd_packet_t cmd;
+    ldcn_status_packet_t status;
+    int ret;
+
+    port = ldcn_serial_open(port_name, baud);
+    if (!port) {
+        return -1;
+    }
+
+    usleep(200000);  /* 200ms settling time */
+
+    /* Try NOP command on a few common addresses */
+    int test_addrs[] = {1, 2, 3, 6};
+    for (int i = 0; i < 4; i++) {
+        ldcn_cmd_packet_t nop_cmd;
+        ldcn_build_command(&nop_cmd, test_addrs[i], LDCN_CMD_NOP, NULL, 0);
+        ret = ldcn_serial_exchange(port, &nop_cmd, &status, 100);
+        if (ret >= 0) {
+            rtapi_print_msg(RTAPI_MSG_INFO,
+                          "%s: Device %d responded at %d baud\n",
+                          COMP_NAME, test_addrs[i], baud);
+            ldcn_serial_close(port);
+            return baud;
+        }
+    }
+
+    ldcn_serial_close(port);
+    return -1;
+}
+
+/* Auto-detect current baud rate */
+static int detect_baud_rate(const char *port_name) {
+    int baud_rates[] = {19200, 125000, 115200, 57600, 9600, 38400};
+    int num_rates = sizeof(baud_rates) / sizeof(baud_rates[0]);
+
+    rtapi_print_msg(RTAPI_MSG_INFO, "%s: Auto-detecting current baud rate...\n", COMP_NAME);
+
+    for (int i = 0; i < num_rates; i++) {
+        rtapi_print_msg(RTAPI_MSG_INFO, "%s: Trying %d baud...\n",
+                       COMP_NAME, baud_rates[i]);
+        if (try_baud_rate(port_name, baud_rates[i]) >= 0) {
+            rtapi_print_msg(RTAPI_MSG_INFO,
+                          "%s: Found devices at %d baud\n",
+                          COMP_NAME, baud_rates[i]);
+            return baud_rates[i];
+        }
+    }
+
+    rtapi_print_msg(RTAPI_MSG_WARN,
+                   "%s: No devices found at any common baud rate, assuming 19200\n",
+                   COMP_NAME);
+    return 19200;
+}
+
+/* Hard reset all LDCN devices */
+static int hard_reset_network(ldcn_serial_port_t *port) {
+    ldcn_cmd_packet_t cmd;
+
+    rtapi_print_msg(RTAPI_MSG_INFO, "%s: Hard reset all LDCN devices...\n", COMP_NAME);
+
+    ldcn_cmd_hard_reset(&cmd, LDCN_ADDR_BROADCAST);
+    ldcn_serial_send_command(port, &cmd);
+
+    usleep(2000000);  /* 2 second delay for reset to complete */
+
+    return 0;
+}
+
+/* Query and discover devices on the network */
+static int discover_devices(ldcn_serial_port_t *port, int max_addr) {
+    ldcn_cmd_packet_t cmd;
+    ldcn_status_packet_t status;
+    int found = 0;
+
+    rtapi_print_msg(RTAPI_MSG_INFO, "%s: Discovering devices (addresses 1-%d)...\n",
+                   COMP_NAME, max_addr);
+
+    for (int addr = 1; addr <= max_addr; addr++) {
+        ldcn_build_command(&cmd, addr, LDCN_CMD_NOP, NULL, 0);
+        int ret = ldcn_serial_exchange(port, &cmd, &status, 100);
+        if (ret >= 0) {
+            rtapi_print_msg(RTAPI_MSG_INFO, "%s: Found device at address %d\n",
+                          COMP_NAME, addr);
+            found++;
+        }
+        usleep(100000);  /* 100ms between queries */
+    }
+
+    rtapi_print_msg(RTAPI_MSG_INFO, "%s: Found %d device(s)\n", COMP_NAME, found);
+    return found;
+}
+
+/* Assign addresses to all LDCN devices */
+static int assign_device_addresses(ldcn_serial_port_t *port, int num_devices) {
+    ldcn_cmd_packet_t cmd;
+    ldcn_status_packet_t status;
+
+    rtapi_print_msg(RTAPI_MSG_INFO, "%s: Assigning addresses to %d devices...\n",
+                   COMP_NAME, num_devices);
+
+    for (int i = 1; i <= num_devices; i++) {
+        /* SET_ADDRESS command: old_addr=0x00, new_addr=i, group=0xFF */
+        ldcn_cmd_set_address(&cmd, LDCN_ADDR_DEFAULT, i, 0xFF, false);
+        int ret = ldcn_serial_exchange(port, &cmd, &status, 100);
+
+        if (ret >= 0) {
+            rtapi_print_msg(RTAPI_MSG_INFO, "%s: Device %d: ✓\n", COMP_NAME, i);
+        } else {
+            rtapi_print_msg(RTAPI_MSG_WARN, "%s: Device %d: ✗\n", COMP_NAME, i);
+        }
+
+        usleep(300000);  /* 300ms between addressing */
+    }
+
+    usleep(2000000);  /* 2 second settling time after addressing */
+    return 0;
+}
+
+/* Verify all devices respond at current baud rate */
+static int verify_devices(ldcn_serial_port_t *port, int num_devices, int baud) {
+    ldcn_cmd_packet_t cmd;
+    ldcn_status_packet_t status;
+    int all_ok = 1;
+
+    rtapi_print_msg(RTAPI_MSG_INFO, "%s: Verifying %d devices at %d baud...\n",
+                   COMP_NAME, num_devices, baud);
+
+    for (int addr = 1; addr <= num_devices; addr++) {
+        ldcn_build_command(&cmd, addr, LDCN_CMD_NOP, NULL, 0);
+        int ret = ldcn_serial_exchange(port, &cmd, &status, 100);
+
+        if (ret >= 0) {
+            rtapi_print_msg(RTAPI_MSG_INFO, "%s: Device %d: ✓\n", COMP_NAME, addr);
+        } else {
+            rtapi_print_msg(RTAPI_MSG_ERR, "%s: Device %d: ✗\n", COMP_NAME, addr);
+            all_ok = 0;
+        }
+    }
+
+    if (!all_ok) {
+        rtapi_print_msg(RTAPI_MSG_ERR, "%s: Not all devices responding at %d baud\n",
+                       COMP_NAME, baud);
+        return -1;
+    }
+
+    return 0;
+}
+
+/* Upgrade communication speed to target baud rate */
+static int upgrade_baud_rate(ldcn_serial_port_t **port_ptr, const char *port_name,
+                             int from_baud, int to_baud) {
+    ldcn_cmd_packet_t cmd;
+    ldcn_baud_rate_t baud_code;
+    ldcn_serial_port_t *old_port = *port_ptr;
+    ldcn_serial_port_t *new_port;
+
+    if (from_baud == to_baud) {
+        rtapi_print_msg(RTAPI_MSG_INFO, "%s: Already at %d baud, skipping upgrade\n",
+                       COMP_NAME, to_baud);
+        return 0;
+    }
+
+    /* Map baud rate to LDCN protocol value */
+    switch (to_baud) {
+        case 57600:   baud_code = LDCN_BAUD_57600; break;
+        case 115200:  baud_code = LDCN_BAUD_115200; break;
+        case 125000:  baud_code = LDCN_BAUD_125000; break;
+        case 312500:  baud_code = LDCN_BAUD_312500; break;
+        case 625000:  baud_code = LDCN_BAUD_625000; break;
+        case 1250000: baud_code = LDCN_BAUD_1250000; break;
+        default:
+            rtapi_print_msg(RTAPI_MSG_ERR, "%s: Unsupported baud rate %d\n",
+                          COMP_NAME, to_baud);
+            return -1;
+    }
+
+    rtapi_print_msg(RTAPI_MSG_INFO, "%s: Upgrading from %d to %d baud...\n",
+                   COMP_NAME, from_baud, to_baud);
+
+    /* Send baud change command to all devices */
+    ldcn_cmd_set_baud(&cmd, baud_code);
+    ldcn_serial_send_command(old_port, &cmd);
+    usleep(500000);  /* 500ms for devices to switch */
+
+    /* Close old port and reopen at new baud */
+    ldcn_serial_close(old_port);
+    usleep(500000);  /* 500ms settling */
+
+    new_port = ldcn_serial_open(port_name, to_baud);
+    if (!new_port) {
+        rtapi_print_msg(RTAPI_MSG_ERR, "%s: Failed to reopen at %d baud\n",
+                       COMP_NAME, to_baud);
+        return -1;
+    }
+
+    usleep(500000);  /* 500ms for serial port to stabilize */
+    *port_ptr = new_port;
+
+    rtapi_print_msg(RTAPI_MSG_INFO, "%s: Reopened at %d baud\n", COMP_NAME, to_baud);
+    return 0;
+}
+
+/* Configure supervisor for full status reporting */
+static int configure_supervisor(ldcn_serial_port_t *port) {
+    ldcn_cmd_packet_t cmd;
+    ldcn_status_packet_t status;
+
+    rtapi_print_msg(RTAPI_MSG_INFO, "%s: Configuring supervisor (device %d)...\n",
+                   COMP_NAME, SUPERVISOR_ADDR);
+
+    /* Send DEFINE_STATUS with 0xFFFF (all status bits) */
+    ldcn_cmd_define_status(&cmd, SUPERVISOR_ADDR, 0xFFFF);
+    ldcn_serial_send_command(port, &cmd);
+
+    usleep(1000000);  /* 1 second for configuration */
+
+    return 0;
+}
+
+/* Wait for human to press power button and monitor for power on */
+static int wait_for_power(ldcn_serial_port_t *port) {
+    ldcn_cmd_packet_t cmd;
+    ldcn_status_packet_t status;
+    uint8_t last_status = 0x00;
+    int power_detected = 0;
+
+    rtapi_print_msg(RTAPI_MSG_INFO,
+                   "%s: ======================================================================\n",
+                   COMP_NAME);
+    rtapi_print_msg(RTAPI_MSG_INFO,
+                   "%s: *** PRESS POWER BUTTON NOW (waiting for power on) ***\n",
+                   COMP_NAME);
+    rtapi_print_msg(RTAPI_MSG_INFO,
+                   "%s: ======================================================================\n",
+                   COMP_NAME);
+
+    /* Read baseline status */
+    ldcn_build_command(&cmd, SUPERVISOR_ADDR, LDCN_CMD_NOP, NULL, 0);
+    for (int attempt = 0; attempt < 5; attempt++) {
+        int ret = ldcn_serial_exchange(port, &cmd, &status, 200);
+        if (ret > 1 && status.data_len > 0) {
+            /* With full status (0xFFFF), status byte is at data[0] (second byte of response) */
+            last_status = status.data[0];
+            rtapi_print_msg(RTAPI_MSG_INFO, "%s: Baseline status: 0x%02X\n",
+                          COMP_NAME, last_status);
+            break;
+        }
+        usleep(200000);
+    }
+
+    rtapi_print_msg(RTAPI_MSG_INFO, "%s: Monitoring for power on...\n", COMP_NAME);
+
+    /* Poll for up to 60 seconds */
+    for (int i = 0; i < 120; i++) {
+        ldcn_build_command(&cmd, SUPERVISOR_ADDR, LDCN_CMD_NOP, NULL, 0);
+        int ret = ldcn_serial_exchange(port, &cmd, &status, 200);
+
+        if (ret > 1 && status.data_len > 0) {
+            uint8_t current_status = status.data[0];
+
+            /* Print every 10th poll or when status changes */
+            if (i % 10 == 0 || current_status != last_status) {
+                rtapi_print_msg(RTAPI_MSG_INFO, "%s: [%3d] Status: 0x%02X, Power bit: %d\n",
+                              COMP_NAME, i, current_status, !!(current_status & 0x08));
+            }
+
+            /* Check if power bit (bit 3) is now set */
+            if (current_status != last_status && (current_status & 0x08)) {
+                rtapi_print_msg(RTAPI_MSG_INFO,
+                              "%s: !!! POWER IS NOW ON (0x%02X -> 0x%02X) !!!\n",
+                              COMP_NAME, last_status, current_status);
+                power_detected = 1;
+                break;
+            }
+
+            last_status = current_status;
+        }
+
+        usleep(500000);  /* Poll every 500ms */
+    }
+
+    if (power_detected) {
+        rtapi_print_msg(RTAPI_MSG_INFO, "%s: ✓ Power detected successfully\n", COMP_NAME);
+        return 0;
+    } else {
+        rtapi_print_msg(RTAPI_MSG_ERR, "%s: ✗ Power not detected (timeout)\n", COMP_NAME);
+        return -1;
+    }
 }
 
 /* Initialize a single drive */
@@ -356,13 +669,28 @@ static int export_axis(int num) {
 /* Print usage */
 static void usage(void) {
     printf("Usage: ldcn [options]\n");
-    printf("Options:\n");
+    printf("\nConfiguration:\n");
     printf("  port=<device>        Serial port (default: %s)\n", DEFAULT_PORT);
-    printf("  baud=<rate>          Baud rate (default: %d)\n", DEFAULT_BAUD);
-    printf("  axes=<count>         Number of axes (default: %d)\n", DEFAULT_AXES);
+    printf("  baud=<rate>          Target baud rate (default: %d)\n", DEFAULT_BAUD);
+    printf("  axes=<count>         Number of servo axes (default: %d)\n", DEFAULT_AXES);
     printf("  servo_rate=<divisor> Servo rate divisor (default: %d)\n", DEFAULT_SERVO_RATE);
     printf("  path_mode=<0|1>      Enable path mode (default: 0)\n");
     printf("  path_buffer_freq=<n> Path buffer frequency (default: %d)\n", DEFAULT_PATH_BUFFER_FREQ);
+    printf("\nInitialization Phases (test individually or combine):\n");
+    printf("  --detect-baud        Auto-detect current baud rate\n");
+    printf("  --reset              Hard reset all LDCN devices\n");
+    printf("  --discover           Query devices on network\n");
+    printf("  --assign             Assign addresses to %d devices\n", TOTAL_LDCN_DEVICES);
+    printf("  --upgrade-baud       Upgrade to target baud rate\n");
+    printf("  --configure-super    Configure supervisor for full status\n");
+    printf("  --wait-power         Wait for power button press (HIIL)\n");
+    printf("  --init-servos        Initialize servo drives\n");
+    printf("  --full-init          Run complete initialization (default)\n");
+    printf("\nExamples:\n");
+    printf("  ldcn port=/dev/ttyUSB0           # Full initialization\n");
+    printf("  ldcn --detect-baud               # Just detect baud rate\n");
+    printf("  ldcn --reset --discover          # Reset and discover devices\n");
+    printf("  ldcn --wait-power                # Just wait for power\n");
 }
 
 /* Parse command line arguments */
@@ -384,6 +712,24 @@ static int parse_args(int argc, char **argv) {
             hal_data->path_mode = atoi(&argv[i][10]) != 0;
         } else if (strncmp(argv[i], "path_buffer_freq=", 17) == 0) {
             hal_data->path_buffer_freq = atoi(&argv[i][17]);
+        } else if (strcmp(argv[i], "--detect-baud") == 0) {
+            hal_data->do_detect_baud = true;
+        } else if (strcmp(argv[i], "--reset") == 0) {
+            hal_data->do_reset = true;
+        } else if (strcmp(argv[i], "--discover") == 0) {
+            hal_data->do_discover = true;
+        } else if (strcmp(argv[i], "--assign") == 0) {
+            hal_data->do_assign = true;
+        } else if (strcmp(argv[i], "--upgrade-baud") == 0) {
+            hal_data->do_upgrade_baud = true;
+        } else if (strcmp(argv[i], "--configure-super") == 0) {
+            hal_data->do_configure_supervisor = true;
+        } else if (strcmp(argv[i], "--wait-power") == 0) {
+            hal_data->do_wait_power = true;
+        } else if (strcmp(argv[i], "--init-servos") == 0) {
+            hal_data->do_init_servos = true;
+        } else if (strcmp(argv[i], "--full-init") == 0) {
+            hal_data->do_full_init = true;
         } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
             usage();
             return -1;
@@ -397,14 +743,15 @@ int main(int argc, char **argv) {
     int ret;
     ldcn_cmd_packet_t cmd;
     ldcn_status_packet_t status;
-    
-    /* Allocate HAL data structure */
+    int comp_id;
+
+    /* Allocate temporary HAL data structure for argument parsing */
     hal_data = calloc(1, sizeof(hal_data_t));
     if (!hal_data) {
         fprintf(stderr, "%s: ERROR: Failed to allocate memory\n", COMP_NAME);
         return -1;
     }
-    
+
     /* Set defaults */
     strncpy(hal_data->port_name, DEFAULT_PORT, sizeof(hal_data->port_name) - 1);
     hal_data->baud_rate = DEFAULT_BAUD;
@@ -412,30 +759,64 @@ int main(int argc, char **argv) {
     hal_data->servo_rate_divisor = DEFAULT_SERVO_RATE;
     hal_data->path_mode = false;
     hal_data->path_buffer_freq = DEFAULT_PATH_BUFFER_FREQ;
-    
+
+    /* Initialize phase control flags */
+    hal_data->do_detect_baud = false;
+    hal_data->do_reset = false;
+    hal_data->do_discover = false;
+    hal_data->do_assign = false;
+    hal_data->do_upgrade_baud = false;
+    hal_data->do_configure_supervisor = false;
+    hal_data->do_wait_power = false;
+    hal_data->do_init_servos = false;
+    hal_data->do_full_init = false;
+
     /* Parse command line */
     if (parse_args(argc, argv) < 0) {
         free(hal_data);
         return -1;
     }
-    
+
+    /* Determine initialization mode: if no specific phases requested, do full init */
+    if (!hal_data->do_detect_baud && !hal_data->do_reset &&
+        !hal_data->do_discover && !hal_data->do_assign &&
+        !hal_data->do_upgrade_baud && !hal_data->do_configure_supervisor &&
+        !hal_data->do_wait_power && !hal_data->do_init_servos) {
+        hal_data->do_full_init = true;
+    }
+
     /* Initialize HAL */
-    hal_data->comp_id = hal_init(COMP_NAME);
-    if (hal_data->comp_id < 0) {
+    comp_id = hal_init(COMP_NAME);
+    if (comp_id < 0) {
         rtapi_print_msg(RTAPI_MSG_ERR, "%s: ERROR: hal_init() failed\n", COMP_NAME);
         free(hal_data);
         return -1;
     }
-    
-    /* Allocate axis data */
-    hal_data->axes = calloc(hal_data->num_axes, sizeof(axis_data_t));
-    if (!hal_data->axes) {
-        rtapi_print_msg(RTAPI_MSG_ERR, "%s: ERROR: Failed to allocate axis data\n", COMP_NAME);
-        hal_exit(hal_data->comp_id);
-        free(hal_data);
+
+    /* Now allocate HAL data structure in shared memory */
+    hal_data_t *temp_data = hal_data;
+    hal_data = hal_malloc(sizeof(hal_data_t));
+    if (!hal_data) {
+        rtapi_print_msg(RTAPI_MSG_ERR, "%s: ERROR: hal_malloc() failed\n", COMP_NAME);
+        hal_exit(comp_id);
+        free(temp_data);
         return -1;
     }
-    
+
+    /* Copy parsed configuration to shared memory */
+    memcpy(hal_data, temp_data, sizeof(hal_data_t));
+    free(temp_data);
+    hal_data->comp_id = comp_id;
+
+    /* Allocate axis data in shared memory */
+    hal_data->axes = hal_malloc(hal_data->num_axes * sizeof(axis_data_t));
+    if (!hal_data->axes) {
+        rtapi_print_msg(RTAPI_MSG_ERR, "%s: ERROR: hal_malloc() failed for axes\n", COMP_NAME);
+        hal_exit(hal_data->comp_id);
+        return -1;
+    }
+    memset(hal_data->axes, 0, hal_data->num_axes * sizeof(axis_data_t));
+
     /* Assign LDCN addresses */
     for (int i = 0; i < hal_data->num_axes; i++) {
         hal_data->axes[i].ldcn_addr = i + 1;  /* Addresses 1-N */
@@ -449,8 +830,7 @@ int main(int argc, char **argv) {
                           "%s: ERROR: Failed to export axis %d\n",
                           COMP_NAME, i);
             hal_exit(hal_data->comp_id);
-            /* Note: axes allocated with hal_malloc, freed by hal_exit */
-            free(hal_data);
+            /* Note: hal_data and axes allocated with hal_malloc, freed by hal_exit */
             return -1;
         }
     }
@@ -464,118 +844,142 @@ int main(int argc, char **argv) {
                    hal_data->port_name, hal_data->baud_rate);
     
     /*
-     * LDCN Initialization Sequence:
-     * 1. Open port at 19200 baud (LDCN protocol default)
-     * 2. Reset all drives to establish known state
-     * 3. Initialize each drive with addressing and parameters
-     * 4. Upgrade to higher baud rate if configured
+     * LDCN Modular Initialization:
+     * Each phase can be run individually or as part of full initialization.
+     * Full sequence: detect baud → reset → discover → assign → upgrade baud →
+     *                configure supervisor → wait for power → init servos
      */
 
-    /* Step 1: Open serial port at 19200 (LDCN default) */
+    /* Phase 1: Auto-detect current baud rate (optional, standalone diagnostic) */
+    int detected_baud = 19200;  /* Default to LDCN protocol default */
+    if (hal_data->do_detect_baud) {
+        detected_baud = detect_baud_rate(hal_data->port_name);
+        if (detected_baud < 0) {
+            rtapi_print_msg(RTAPI_MSG_ERR, "%s: ERROR: Baud rate detection failed\n", COMP_NAME);
+            hal_exit(hal_data->comp_id);
+            return -1;
+        }
+        /* For standalone detect, just report and exit */
+        if (!hal_data->do_full_init) {
+            hal_exit(hal_data->comp_id);
+            return 0;
+        }
+    }
+
+    /* Open serial port at detected or default baud */
     rtapi_print_msg(RTAPI_MSG_INFO,
-                   "%s: Opening %s at 19200 baud (LDCN default)\n",
-                   COMP_NAME, hal_data->port_name);
-    hal_data->port = ldcn_serial_open(hal_data->port_name, 19200);
+                   "%s: Opening %s at %d baud\n",
+                   COMP_NAME, hal_data->port_name, detected_baud);
+    hal_data->port = ldcn_serial_open(hal_data->port_name, detected_baud);
     if (!hal_data->port) {
         rtapi_print_msg(RTAPI_MSG_ERR,
                        "%s: ERROR: Failed to open serial port %s\n",
                        COMP_NAME, hal_data->port_name);
         hal_exit(hal_data->comp_id);
-        free(hal_data->axes);
-        free(hal_data);
         return -1;
     }
 
-    /* Step 2: Reset all drives */
-    rtapi_print_msg(RTAPI_MSG_INFO, "%s: Resetting all LDCN devices...\n", COMP_NAME);
-    ldcn_cmd_hard_reset(&cmd, LDCN_ADDR_BROADCAST);
-    ldcn_serial_send_command(hal_data->port, &cmd);
-    usleep(100000);  /* 100ms delay after reset */
-
-    /* Step 3: Initialize each drive at 19200 baud */
-    rtapi_print_msg(RTAPI_MSG_INFO, "%s: Initializing %d drives at 19200 baud...\n",
-                   COMP_NAME, hal_data->num_axes);
-    for (int i = 0; i < hal_data->num_axes; i++) {
-        if (init_drive(i) < 0) {
-            rtapi_print_msg(RTAPI_MSG_ERR,
-                          "%s: ERROR: Failed to initialize axis %d\n",
-                          COMP_NAME, i);
+    /* Phase 2: Hard reset network (resets all devices to 19200 baud) */
+    if (hal_data->do_reset || hal_data->do_full_init) {
+        ret = hard_reset_network(hal_data->port);
+        if (ret < 0) {
+            rtapi_print_msg(RTAPI_MSG_ERR, "%s: ERROR: Network reset failed\n", COMP_NAME);
             ldcn_serial_close(hal_data->port);
             hal_exit(hal_data->comp_id);
-            /* Note: axes allocated with hal_malloc, freed by hal_exit */
-            free(hal_data);
+            return -1;
+        }
+
+        /* After reset, devices are at 19200, so reopen port at 19200 if needed */
+        if (detected_baud != 19200) {
+            ldcn_serial_close(hal_data->port);
+            rtapi_print_msg(RTAPI_MSG_INFO,
+                           "%s: Reopening %s at 19200 baud after reset\n",
+                           COMP_NAME, hal_data->port_name);
+            hal_data->port = ldcn_serial_open(hal_data->port_name, 19200);
+            if (!hal_data->port) {
+                rtapi_print_msg(RTAPI_MSG_ERR,
+                               "%s: ERROR: Failed to reopen serial port\n",
+                               COMP_NAME);
+                hal_exit(hal_data->comp_id);
+                return -1;
+            }
+        }
+    }
+
+    /* Phase 3: Discover devices on network */
+    int num_devices = TOTAL_LDCN_DEVICES;  /* Default assumption */
+    if (hal_data->do_discover || hal_data->do_full_init) {
+        num_devices = discover_devices(hal_data->port, TOTAL_LDCN_DEVICES);
+        if (num_devices < 0) {
+            rtapi_print_msg(RTAPI_MSG_ERR, "%s: ERROR: Device discovery failed\n", COMP_NAME);
+            ldcn_serial_close(hal_data->port);
+            hal_exit(hal_data->comp_id);
+            return -1;
+        }
+        rtapi_print_msg(RTAPI_MSG_INFO, "%s: Discovered %d LDCN devices\n", COMP_NAME, num_devices);
+    }
+
+    /* Phase 4: Assign addresses to all devices */
+    if (hal_data->do_assign || hal_data->do_full_init) {
+        ret = assign_device_addresses(hal_data->port, num_devices);
+        if (ret < 0) {
+            rtapi_print_msg(RTAPI_MSG_ERR, "%s: ERROR: Address assignment failed\n", COMP_NAME);
+            ldcn_serial_close(hal_data->port);
+            hal_exit(hal_data->comp_id);
             return -1;
         }
     }
 
-    /* Step 4: Upgrade baud rate if different from 19200 */
-    if (hal_data->baud_rate != 19200) {
-        ldcn_baud_rate_t baud_code;
-
-        /* Map baud rate to LDCN protocol value */
-        switch (hal_data->baud_rate) {
-            case 57600:   baud_code = LDCN_BAUD_57600; break;
-            case 115200:  baud_code = LDCN_BAUD_115200; break;
-            case 125000:  baud_code = LDCN_BAUD_125000; break;
-            case 312500:  baud_code = LDCN_BAUD_312500; break;
-            case 625000:  baud_code = LDCN_BAUD_625000; break;
-            case 1250000: baud_code = LDCN_BAUD_1250000; break;
-            default:
-                rtapi_print_msg(RTAPI_MSG_WARN,
-                              "%s: Unsupported baud rate %d, staying at 19200\n",
-                              COMP_NAME, hal_data->baud_rate);
-                hal_data->baud_rate = 19200;
-                goto skip_baud_upgrade;
-        }
-
-        rtapi_print_msg(RTAPI_MSG_INFO,
-                       "%s: Upgrading communication speed to %d baud...\n",
-                       COMP_NAME, hal_data->baud_rate);
-
-        /* Send baud rate change command to all drives */
-        ldcn_cmd_set_baud(&cmd, baud_code);
-        ldcn_serial_send_command(hal_data->port, &cmd);
-
-        /* Wait for drives to switch baud rate */
-        usleep(50000);  /* 50ms delay */
-
-        /* Change host serial port baud rate */
-        ret = ldcn_serial_set_baud(hal_data->port, hal_data->baud_rate);
+    /* Phase 5: Upgrade baud rate if different from 19200 */
+    if ((hal_data->do_upgrade_baud || hal_data->do_full_init) && hal_data->baud_rate != 19200) {
+        ret = upgrade_baud_rate(&hal_data->port, hal_data->port_name, 19200, hal_data->baud_rate);
         if (ret < 0) {
-            rtapi_print_msg(RTAPI_MSG_ERR,
-                          "%s: ERROR: Failed to change host baud rate to %d\n",
-                          COMP_NAME, hal_data->baud_rate);
-            ldcn_serial_close(hal_data->port);
+            rtapi_print_msg(RTAPI_MSG_ERR, "%s: ERROR: Baud rate upgrade failed\n", COMP_NAME);
+            if (hal_data->port) {
+                ldcn_serial_close(hal_data->port);
+            }
             hal_exit(hal_data->comp_id);
-            /* Note: axes allocated with hal_malloc, freed by hal_exit */
-            free(hal_data);
             return -1;
         }
-
-        /* Verify communication at new baud rate */
-        rtapi_print_msg(RTAPI_MSG_INFO,
-                       "%s: Verifying communication at %d baud...\n",
-                       COMP_NAME, hal_data->baud_rate);
-        ldcn_cmd_read_status(&cmd, hal_data->axes[0].ldcn_addr,
-                            LDCN_STATUS_SEND_POS);
-        ret = ldcn_serial_exchange(hal_data->port, &cmd, &status, 100);
-        if (ret < 0) {
-            rtapi_print_msg(RTAPI_MSG_ERR,
-                          "%s: ERROR: Communication failed at %d baud\n",
-                          COMP_NAME, hal_data->baud_rate);
-            ldcn_serial_close(hal_data->port);
-            hal_exit(hal_data->comp_id);
-            /* Note: axes allocated with hal_malloc, freed by hal_exit */
-            free(hal_data);
-            return -1;
-        }
-
-        rtapi_print_msg(RTAPI_MSG_INFO,
-                       "%s: Successfully upgraded to %d baud\n",
-                       COMP_NAME, hal_data->baud_rate);
     }
 
-skip_baud_upgrade:
+    /* Phase 6: Configure supervisor for full status reporting */
+    if (hal_data->do_configure_supervisor || hal_data->do_full_init) {
+        ret = configure_supervisor(hal_data->port);
+        if (ret < 0) {
+            rtapi_print_msg(RTAPI_MSG_ERR, "%s: ERROR: Supervisor configuration failed\n", COMP_NAME);
+            ldcn_serial_close(hal_data->port);
+            hal_exit(hal_data->comp_id);
+            return -1;
+        }
+    }
+
+    /* Phase 7: Wait for power button press (HIIL - Human In The Loop) */
+    if (hal_data->do_wait_power || hal_data->do_full_init) {
+        ret = wait_for_power(hal_data->port);
+        if (ret < 0) {
+            rtapi_print_msg(RTAPI_MSG_ERR, "%s: ERROR: Power wait failed or timed out\n", COMP_NAME);
+            ldcn_serial_close(hal_data->port);
+            hal_exit(hal_data->comp_id);
+            return -1;
+        }
+    }
+
+    /* Phase 8: Initialize servo drives */
+    if (hal_data->do_init_servos || hal_data->do_full_init) {
+        rtapi_print_msg(RTAPI_MSG_INFO, "%s: Initializing %d servo drives...\n",
+                       COMP_NAME, hal_data->num_axes);
+        for (int i = 0; i < hal_data->num_axes; i++) {
+            if (init_drive(i) < 0) {
+                rtapi_print_msg(RTAPI_MSG_ERR,
+                              "%s: ERROR: Failed to initialize axis %d\n",
+                              COMP_NAME, i);
+                ldcn_serial_close(hal_data->port);
+                hal_exit(hal_data->comp_id);
+                return -1;
+            }
+        }
+    }
     
     /* Setup signal handlers */
     signal(SIGINT, quit);
@@ -598,11 +1002,10 @@ skip_baud_upgrade:
         ldcn_cmd_stop_motor(&cmd, hal_data->axes[i].ldcn_addr, LDCN_STOP_MOTOR_OFF);
         ldcn_serial_send_command(hal_data->port, &cmd);
     }
-    
+
     ldcn_serial_close(hal_data->port);
     hal_exit(hal_data->comp_id);
-    free(hal_data->axes);
-    free(hal_data);
-    
+    /* Note: hal_data and axes allocated with hal_malloc, freed by hal_exit */
+
     return 0;
 }
