@@ -72,14 +72,20 @@ ldcn_serial_port_t *ldcn_serial_open(const char *device, int baud_rate) {
     strncpy(port->device, device, sizeof(port->device) - 1);
     port->baud_rate = baud_rate;
     
-    /* Open serial device */
+    /* Open serial device (use O_NONBLOCK initially to avoid blocking on DCD) */
     port->fd = open(device, O_RDWR | O_NOCTTY | O_NONBLOCK);
     if (port->fd < 0) {
         fprintf(stderr, "Failed to open %s: %s\n", device, strerror(errno));
         free(port);
         return NULL;
     }
-    
+
+    /* Clear O_NONBLOCK for proper blocking I/O */
+    int flags = fcntl(port->fd, F_GETFL, 0);
+    if (flags >= 0) {
+        fcntl(port->fd, F_SETFL, flags & ~O_NONBLOCK);
+    }
+
     /* Get current terminal settings */
     if (tcgetattr(port->fd, &port->orig_termios) < 0) {
         perror("tcgetattr");
@@ -88,21 +94,15 @@ ldcn_serial_port_t *ldcn_serial_open(const char *device, int baud_rate) {
         return NULL;
     }
     
-    /* Configure terminal for raw 8N1 mode */
+    /* Configure terminal for raw 8N1 mode - match Python pyserial exactly */
     memset(&tio, 0, sizeof(tio));
-    
-    /* Control modes */
-    tio.c_cflag = CS8 | CREAD | CLOCAL;  /* 8 bits, enable receiver, local line */
-    
-    /* Input modes */
-    tio.c_iflag = 0;  /* No input processing */
-    
-    /* Output modes */
-    tio.c_oflag = 0;  /* No output processing */
-    
-    /* Local modes */
-    tio.c_lflag = 0;  /* Non-canonical, no echo */
-    
+
+    /* Use exact same flags as Python pyserial */
+    tio.c_iflag = 0;        /* iflag = 0x00000000 */
+    tio.c_oflag = 0;        /* oflag = 0x00000000 */
+    tio.c_cflag = 0x08be;   /* cflag = 0x000008be (from Python) */
+    tio.c_lflag = 0;        /* lflag = 0x00000000 */
+
     /* Control characters */
     tio.c_cc[VMIN] = 0;   /* Non-blocking read */
     tio.c_cc[VTIME] = 0;  /* No timeout */
@@ -144,6 +144,9 @@ ldcn_serial_port_t *ldcn_serial_open(const char *device, int baud_rate) {
     /* Flush any existing data */
     tcflush(port->fd, TCIOFLUSH);
 
+    /* Wait for port to stabilize (like Python pyserial does) */
+    usleep(200000);  /* 200ms */
+
     return port;
 }
 
@@ -163,32 +166,44 @@ void ldcn_serial_close(ldcn_serial_port_t *port) {
 /* Send command packet */
 int ldcn_serial_send_command(ldcn_serial_port_t *port, const ldcn_cmd_packet_t *cmd) {
     if (!port || !cmd) return -1;
-    
+
     /* Build packet to send: header + address + command + data + checksum */
     uint8_t buffer[LDCN_MAX_DATA_BYTES + 4];
     int len = 0;
-    
+
     buffer[len++] = cmd->header;
     buffer[len++] = cmd->address;
     buffer[len++] = cmd->command;
-    
+
     for (int i = 0; i < cmd->data_len; i++) {
         buffer[len++] = cmd->data[i];
     }
-    
+
     buffer[len++] = cmd->checksum;
-    
+
+    /* Debug: print hex dump */
+    fprintf(stderr, "TX (%d bytes): ", len);
+    for (int i = 0; i < len; i++) {
+        fprintf(stderr, "%02x", buffer[i]);
+    }
+    fprintf(stderr, "\n");
+
     /* Send packet */
     int sent = write(port->fd, buffer, len);
     if (sent < 0) {
         perror("write");
         return -1;
     }
-    
+
     if (sent != len) {
         fprintf(stderr, "Warning: partial write (%d of %d bytes)\n", sent, len);
     }
-    
+
+    fprintf(stderr, "  -> wrote %d bytes to fd=%d\n", sent, port->fd);
+
+    /* Drain output to ensure transmission */
+    tcdrain(port->fd);
+
     return sent;
 }
 

@@ -31,7 +31,12 @@
       "Bash(sudo dmesg:*)",
       "Bash(python3:*)",
       "Bash(killall:*)",
-      "Bash(timeout 30 halrun:*)"
+      "Bash(timeout 30 halrun:*)",
+      "Bash(halrun:*)",
+      "Bash(gcc:*)",
+      "Bash(./test_serial_c:*)",
+      "Bash(strace:*)",
+      "Read(//tmp/**)"
     ],
     "deny": [],
     "ask": []
