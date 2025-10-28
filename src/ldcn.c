@@ -464,8 +464,19 @@ int main(int argc, char **argv) {
                    COMP_NAME, hal_data->num_axes,
                    hal_data->port_name, hal_data->baud_rate);
     
-    /* Open serial port */
-    hal_data->port = ldcn_serial_open(hal_data->port_name, hal_data->baud_rate);
+    /*
+     * LDCN Initialization Sequence:
+     * 1. Open port at 19200 baud (LDCN protocol default)
+     * 2. Reset all drives to establish known state
+     * 3. Initialize each drive with addressing and parameters
+     * 4. Upgrade to higher baud rate if configured
+     */
+
+    /* Step 1: Open serial port at 19200 (LDCN default) */
+    rtapi_print_msg(RTAPI_MSG_INFO,
+                   "%s: Opening %s at 19200 baud (LDCN default)\n",
+                   COMP_NAME, hal_data->port_name);
+    hal_data->port = ldcn_serial_open(hal_data->port_name, 19200);
     if (!hal_data->port) {
         rtapi_print_msg(RTAPI_MSG_ERR,
                        "%s: ERROR: Failed to open serial port %s\n",
@@ -475,14 +486,16 @@ int main(int argc, char **argv) {
         free(hal_data);
         return -1;
     }
-    
-    /* Reset all drives */
-    rtapi_print_msg(RTAPI_MSG_INFO, "%s: Resetting all drives...\n", COMP_NAME);
+
+    /* Step 2: Reset all drives */
+    rtapi_print_msg(RTAPI_MSG_INFO, "%s: Resetting all LDCN devices...\n", COMP_NAME);
     ldcn_cmd_hard_reset(&cmd, LDCN_ADDR_BROADCAST);
     ldcn_serial_send_command(hal_data->port, &cmd);
     usleep(100000);  /* 100ms delay after reset */
-    
-    /* Initialize each drive */
+
+    /* Step 3: Initialize each drive at 19200 baud */
+    rtapi_print_msg(RTAPI_MSG_INFO, "%s: Initializing %d drives at 19200 baud...\n",
+                   COMP_NAME, hal_data->num_axes);
     for (int i = 0; i < hal_data->num_axes; i++) {
         if (init_drive(i) < 0) {
             rtapi_print_msg(RTAPI_MSG_ERR,
@@ -495,6 +508,75 @@ int main(int argc, char **argv) {
             return -1;
         }
     }
+
+    /* Step 4: Upgrade baud rate if different from 19200 */
+    if (hal_data->baud_rate != 19200) {
+        ldcn_baud_rate_t baud_code;
+
+        /* Map baud rate to LDCN protocol value */
+        switch (hal_data->baud_rate) {
+            case 57600:   baud_code = LDCN_BAUD_57600; break;
+            case 115200:  baud_code = LDCN_BAUD_115200; break;
+            case 125000:  baud_code = LDCN_BAUD_125000; break;
+            case 312500:  baud_code = LDCN_BAUD_312500; break;
+            case 625000:  baud_code = LDCN_BAUD_625000; break;
+            case 1250000: baud_code = LDCN_BAUD_1250000; break;
+            default:
+                rtapi_print_msg(RTAPI_MSG_WARN,
+                              "%s: Unsupported baud rate %d, staying at 19200\n",
+                              COMP_NAME, hal_data->baud_rate);
+                hal_data->baud_rate = 19200;
+                goto skip_baud_upgrade;
+        }
+
+        rtapi_print_msg(RTAPI_MSG_INFO,
+                       "%s: Upgrading communication speed to %d baud...\n",
+                       COMP_NAME, hal_data->baud_rate);
+
+        /* Send baud rate change command to all drives */
+        ldcn_cmd_set_baud(&cmd, baud_code);
+        ldcn_serial_send_command(hal_data->port, &cmd);
+
+        /* Wait for drives to switch baud rate */
+        usleep(50000);  /* 50ms delay */
+
+        /* Change host serial port baud rate */
+        ret = ldcn_serial_set_baud(hal_data->port, hal_data->baud_rate);
+        if (ret < 0) {
+            rtapi_print_msg(RTAPI_MSG_ERR,
+                          "%s: ERROR: Failed to change host baud rate to %d\n",
+                          COMP_NAME, hal_data->baud_rate);
+            ldcn_serial_close(hal_data->port);
+            hal_exit(hal_data->comp_id);
+            free(hal_data->axes);
+            free(hal_data);
+            return -1;
+        }
+
+        /* Verify communication at new baud rate */
+        rtapi_print_msg(RTAPI_MSG_INFO,
+                       "%s: Verifying communication at %d baud...\n",
+                       COMP_NAME, hal_data->baud_rate);
+        ldcn_cmd_read_status(&cmd, hal_data->axes[0].ldcn_addr,
+                            LDCN_STATUS_SEND_POS);
+        ret = ldcn_serial_exchange(hal_data->port, &cmd, &status, 100);
+        if (ret < 0) {
+            rtapi_print_msg(RTAPI_MSG_ERR,
+                          "%s: ERROR: Communication failed at %d baud\n",
+                          COMP_NAME, hal_data->baud_rate);
+            ldcn_serial_close(hal_data->port);
+            hal_exit(hal_data->comp_id);
+            free(hal_data->axes);
+            free(hal_data);
+            return -1;
+        }
+
+        rtapi_print_msg(RTAPI_MSG_INFO,
+                       "%s: Successfully upgraded to %d baud\n",
+                       COMP_NAME, hal_data->baud_rate);
+    }
+
+skip_baud_upgrade:
     
     /* Setup signal handlers */
     signal(SIGINT, quit);

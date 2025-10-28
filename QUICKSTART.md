@@ -26,8 +26,12 @@ sudo usermod -a -G dialout $USER
 ## Step 3: Test Driver (2 minutes)
 
 ```bash
-./ldcn port=/dev/ttyUSB0 baud=115200 axes=1
+# Driver starts at 19200 and upgrades to target baud automatically
+./ldcn port=/dev/ttyUSB0 baud=125000 axes=1
 # Press Ctrl+C to stop
+
+# Or stay at default 19200 (slower but more reliable over long cables)
+./ldcn port=/dev/ttyUSB0 baud=19200 axes=1
 ```
 
 ## Step 4: Calculate Your Scale (2 minutes)
@@ -44,7 +48,8 @@ SCALE = 2000 / 5 = 400 counts/mm
 Edit your HAL file:
 
 ```hal
-loadusr -W ldcn port=/dev/ttyUSB0 baud=115200 axes=3
+# Driver initializes at 19200, then upgrades to 125000 for better performance
+loadusr -W ldcn port=/dev/ttyUSB0 baud=125000 axes=3
 
 setp ldcn.0.scale 400.0  # Your calculated value
 setp ldcn.0.kp 50

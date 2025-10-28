@@ -107,6 +107,58 @@ src/
 └── Makefile          # Build system
 ```
 
+### LDCN Initialization Sequence
+
+The driver performs a standardized initialization sequence that follows the LDCN protocol requirements:
+
+**Step 1: Open Communications (19200 baud)**
+- Opens serial port at 19200 baud (LDCN protocol default)
+- All LDCN devices power up at 19200 baud by default
+- Required for initial communication before baud upgrade
+
+**Step 2: Reset All Devices**
+- Sends `HARD_RESET` command to broadcast address (0xFF)
+- Resets all drives to known state
+- Clears any error conditions
+- 100ms delay for devices to complete reset
+
+**Step 3: Initialize Each Drive**
+- Sets individual addresses (1, 2, 3, ...)
+- Configures status reporting format
+- Sets PID gains (Kp, Kd, Ki)
+- Loads initial trajectory parameters
+- Enables servo amplifiers
+
+**Step 4: Upgrade Baud Rate (Optional)**
+- If configured baud ≠ 19200, upgrades to target speed
+- Sends `SET_BAUD` command to all drives
+- Changes host serial port baud rate
+- Verifies communication at new speed
+- Supported rates: 57600, 115200, 125000, 312500, 625000, 1250000
+
+**Example Log Output:**
+```
+ldcn: Opening /dev/ttyUSB0 at 19200 baud (LDCN default)
+ldcn: Resetting all LDCN devices...
+ldcn: Initializing 3 drives at 19200 baud...
+ldcn: Initializing axis 0 (addr 0x01)
+ldcn: Axis 0 initialized successfully
+ldcn: Initializing axis 1 (addr 0x02)
+ldcn: Axis 1 initialized successfully
+ldcn: Initializing axis 2 (addr 0x03)
+ldcn: Axis 2 initialized successfully
+ldcn: Upgrading communication speed to 125000 baud...
+ldcn: Verifying communication at 125000 baud...
+ldcn: Successfully upgraded to 125000 baud
+ldcn: Entering main loop
+```
+
+**Why This Sequence?**
+- LDCN protocol requires 19200 baud for initial communication
+- Reset ensures all drives start in known state
+- Individual addressing allows multi-drop RS-485 network
+- Baud upgrade improves update rates and reduces latency
+
 ## Configuration
 
 ### Basic Setup
