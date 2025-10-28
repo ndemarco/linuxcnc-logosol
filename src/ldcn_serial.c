@@ -16,6 +16,8 @@
 #include <errno.h>
 #include <termios.h>
 #include <sys/select.h>
+#include <sys/ioctl.h>
+#include <linux/serial.h>
 
 /* Serial Port Structure */
 struct ldcn_serial_port {
@@ -42,6 +44,12 @@ static speed_t baud_to_speed(int baud) {
         case 1152000: return B1152000;
         case 1500000: return B1500000;
         case 2000000: return B2000000;
+        /* LDCN-specific baud rates - use B38400 as placeholder for custom baud */
+        case 125000:
+        case 312500:
+        case 625000:
+        case 1250000:
+            return B38400;  /* Will set actual baud with TIOCSSERIAL */
         default:
             fprintf(stderr, "Warning: unsupported baud rate %d, using 115200\n", baud);
             return B115200;
@@ -111,10 +119,31 @@ ldcn_serial_port_t *ldcn_serial_open(const char *device, int baud_rate) {
         free(port);
         return NULL;
     }
-    
+
+    /* Set custom baud rate for LDCN-specific rates using FTDI ioctl */
+    if (baud_rate == 125000 || baud_rate == 312500 ||
+        baud_rate == 625000 || baud_rate == 1250000) {
+        struct serial_struct serial;
+
+        if (ioctl(port->fd, TIOCGSERIAL, &serial) < 0) {
+            fprintf(stderr, "Warning: failed to get serial info for custom baud: %s\n",
+                    strerror(errno));
+            fprintf(stderr, "         continuing with standard baud rate\n");
+        } else {
+            serial.flags = (serial.flags & ~ASYNC_SPD_MASK) | ASYNC_SPD_CUST;
+            serial.custom_divisor = (serial.baud_base + (baud_rate / 2)) / baud_rate;
+
+            if (ioctl(port->fd, TIOCSSERIAL, &serial) < 0) {
+                fprintf(stderr, "Warning: failed to set custom baud %d: %s\n",
+                        baud_rate, strerror(errno));
+                fprintf(stderr, "         continuing with standard baud rate\n");
+            }
+        }
+    }
+
     /* Flush any existing data */
     tcflush(port->fd, TCIOFLUSH);
-    
+
     return port;
 }
 
@@ -290,12 +319,33 @@ int ldcn_serial_set_baud(ldcn_serial_port_t *port, int baud_rate) {
         perror("tcsetattr");
         return -1;
     }
-    
+
+    /* Set custom baud rate for LDCN-specific rates using FTDI ioctl */
+    if (baud_rate == 125000 || baud_rate == 312500 ||
+        baud_rate == 625000 || baud_rate == 1250000) {
+        struct serial_struct serial;
+
+        if (ioctl(port->fd, TIOCGSERIAL, &serial) < 0) {
+            fprintf(stderr, "Warning: failed to get serial info for custom baud: %s\n",
+                    strerror(errno));
+            fprintf(stderr, "         continuing with standard baud rate\n");
+        } else {
+            serial.flags = (serial.flags & ~ASYNC_SPD_MASK) | ASYNC_SPD_CUST;
+            serial.custom_divisor = (serial.baud_base + (baud_rate / 2)) / baud_rate;
+
+            if (ioctl(port->fd, TIOCSSERIAL, &serial) < 0) {
+                fprintf(stderr, "Warning: failed to set custom baud %d: %s\n",
+                        baud_rate, strerror(errno));
+                fprintf(stderr, "         continuing with standard baud rate\n");
+            }
+        }
+    }
+
     port->baud_rate = baud_rate;
-    
+
     /* Flush buffers */
     tcflush(port->fd, TCIOFLUSH);
-    
+
     return 0;
 }
 

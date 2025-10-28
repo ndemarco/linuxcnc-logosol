@@ -24,7 +24,14 @@
       "WebFetch(domain:linuxcnc.org)",
       "WebSearch",
       "WebFetch(domain:github.com)",
-      "Bash(git ls-tree:*)"
+      "Bash(git ls-tree:*)",
+      "Read(//dev/**)",
+      "Bash(journalctl:*)",
+      "Bash(lsusb:*)",
+      "Bash(sudo dmesg:*)",
+      "Bash(python3:*)",
+      "Bash(killall:*)",
+      "Bash(timeout 30 halrun:*)"
     ],
     "deny": [],
     "ask": []
