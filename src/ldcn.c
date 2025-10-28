@@ -359,7 +359,7 @@ static int wait_for_power(ldcn_serial_port_t *port) {
     for (int attempt = 0; attempt < 5; attempt++) {
         int ret = ldcn_serial_exchange(port, &cmd, &status, 200);
         if (ret > 1 && status.data_len > 0) {
-            /* With full status (0xFFFF), status byte is at data[0] (second byte of response) */
+            /* Status byte is data[0] (Python response[1], the 2nd byte) */
             last_status = status.data[0];
             rtapi_print_msg(RTAPI_MSG_INFO, "%s: Baseline status: 0x%02X\n",
                           COMP_NAME, last_status);
@@ -376,6 +376,7 @@ static int wait_for_power(ldcn_serial_port_t *port) {
         int ret = ldcn_serial_exchange(port, &cmd, &status, 200);
 
         if (ret > 1 && status.data_len > 0) {
+            /* Status byte is data[0] (Python response[1], the 2nd byte) */
             uint8_t current_status = status.data[0];
 
             /* Print every 10th poll or when status changes */
@@ -416,22 +417,24 @@ static int init_drive(int axis_num) {
     ldcn_gain_params_t gains;
     ldcn_trajectory_t traj;
     int ret;
-    
+
     rtapi_print_msg(RTAPI_MSG_INFO, "%s: Initializing axis %d (addr 0x%02X)\n",
                    COMP_NAME, axis_num, axis->ldcn_addr);
-    
-    /* Step 1: Set address */
-    ldcn_cmd_set_address(&cmd, LDCN_ADDR_DEFAULT,
-                        axis->ldcn_addr, LDCN_DEFAULT_GROUP_ADDR, false);
-    ret = ldcn_serial_exchange(hal_data->port, &cmd, &status, 100);
-    if (ret < 0) {
-        rtapi_print_msg(RTAPI_MSG_ERR,
-                       "%s: Failed to set address for axis %d\n",
-                       COMP_NAME, axis_num);
-        return -1;
+
+    /* Step 1: Set address (skip if already addressed during full_init) */
+    if (!hal_data->do_full_init) {
+        ldcn_cmd_set_address(&cmd, LDCN_ADDR_DEFAULT,
+                            axis->ldcn_addr, LDCN_DEFAULT_GROUP_ADDR, false);
+        ret = ldcn_serial_exchange(hal_data->port, &cmd, &status, 100);
+        if (ret < 0) {
+            rtapi_print_msg(RTAPI_MSG_ERR,
+                           "%s: Failed to set address for axis %d\n",
+                           COMP_NAME, axis_num);
+            return -1;
+        }
+
+        usleep(10000);  /* 10ms delay */
     }
-    
-    usleep(10000);  /* 10ms delay */
     
     /* Step 2: Configure status reporting */
     uint16_t status_bits = LDCN_STATUS_SEND_POS | LDCN_STATUS_SEND_VEL |
@@ -446,11 +449,12 @@ static int init_drive(int axis_num) {
     
     /* Step 3: Set PID gains */
     memset(&gains, 0, sizeof(gains));
-    gains.kp = axis->kp ? axis->kp : 50;     /* Default gains */
-    gains.kd = axis->kd ? axis->kd : 8000;
-    gains.ki = axis->ki ? axis->ki : 50;
+    /* Conservative default gains for safe operation - tune per axis later */
+    gains.kp = axis->kp ? axis->kp : 10;     /* Low proportional gain */
+    gains.kd = axis->kd ? axis->kd : 100;    /* Low derivative gain */
+    gains.ki = axis->ki ? axis->ki : 0;      /* Disable integral initially */
     gains.il = 500;
-    gains.ol = 0xFA;  /* Output limit */
+    gains.ol = 0x80;  /* Output limit - reduced to 50% for safety */
     gains.cl = 0;     /* Current limit (0 = disabled) */
     gains.el = 1024;  /* Position error limit */
     gains.sr = hal_data->servo_rate_divisor;
@@ -646,17 +650,17 @@ static int export_axis(int num) {
     ret = hal_param_u32_newf(HAL_RW, &axis->kp, hal_data->comp_id,
                             "%s.%d.kp", COMP_NAME, num);
     if (ret != 0) return ret;
-    axis->kp = 50;
+    axis->kp = 10;    /* Conservative default - tune per axis to avoid oscillation */
 
     ret = hal_param_u32_newf(HAL_RW, &axis->kd, hal_data->comp_id,
                             "%s.%d.kd", COMP_NAME, num);
     if (ret != 0) return ret;
-    axis->kd = 8000;
+    axis->kd = 100;   /* Conservative default - tune per axis to avoid oscillation */
 
     ret = hal_param_u32_newf(HAL_RW, &axis->ki, hal_data->comp_id,
                             "%s.%d.ki", COMP_NAME, num);
     if (ret != 0) return ret;
-    axis->ki = 50;
+    axis->ki = 0;     /* Disabled by default - enable after tuning kp/kd */
 
     ret = hal_param_u32_newf(HAL_RO, &axis->address, hal_data->comp_id,
                             "%s.%d.address", COMP_NAME, num);
@@ -783,6 +787,9 @@ int main(int argc, char **argv) {
         !hal_data->do_upgrade_baud && !hal_data->do_configure_supervisor &&
         !hal_data->do_wait_power && !hal_data->do_init_servos) {
         hal_data->do_full_init = true;
+        /* Full init requires power-wait for hardware to be ready */
+        hal_data->do_wait_power = true;
+        fprintf(stderr, "DEBUG: Setting do_wait_power=1 during full_init setup\n");
     }
 
     /* Initialize HAL */
@@ -850,9 +857,10 @@ int main(int argc, char **argv) {
      *                configure supervisor → wait for power → init servos
      */
 
-    /* Phase 1: Auto-detect current baud rate (optional, standalone diagnostic) */
+    /* Phase 1: Auto-detect current baud rate */
+    /* Always detect during full_init for robust reset, or when explicitly requested */
     int detected_baud = 19200;  /* Default to LDCN protocol default */
-    if (hal_data->do_detect_baud) {
+    if (hal_data->do_detect_baud || hal_data->do_full_init) {
         detected_baud = detect_baud_rate(hal_data->port_name);
         if (detected_baud < 0) {
             rtapi_print_msg(RTAPI_MSG_ERR, "%s: ERROR: Baud rate detection failed\n", COMP_NAME);
@@ -860,7 +868,7 @@ int main(int argc, char **argv) {
             return -1;
         }
         /* For standalone detect, just report and exit */
-        if (!hal_data->do_full_init) {
+        if (hal_data->do_detect_baud && !hal_data->do_full_init) {
             hal_exit(hal_data->comp_id);
             return 0;
         }
@@ -880,21 +888,27 @@ int main(int argc, char **argv) {
     }
 
     /* Phase 2: Hard reset network (resets all devices to 19200 baud) */
+    /* For robust reset: if devices not at 19200, reset at current baud first */
     if (hal_data->do_reset || hal_data->do_full_init) {
-        ret = hard_reset_network(hal_data->port);
-        if (ret < 0) {
-            rtapi_print_msg(RTAPI_MSG_ERR, "%s: ERROR: Network reset failed\n", COMP_NAME);
-            ldcn_serial_close(hal_data->port);
-            hal_exit(hal_data->comp_id);
-            return -1;
-        }
-
-        /* After reset, devices are at 19200, so reopen port at 19200 if needed */
-        if (detected_baud != 19200) {
-            ldcn_serial_close(hal_data->port);
+        /* If devices are at a different baud, send reset at that baud first */
+        if (detected_baud != 19200 && detected_baud > 0) {
             rtapi_print_msg(RTAPI_MSG_INFO,
-                           "%s: Reopening %s at 19200 baud after reset\n",
-                           COMP_NAME, hal_data->port_name);
+                           "%s: Sending hard reset at detected baud %d...\n",
+                           COMP_NAME, detected_baud);
+            ret = hard_reset_network(hal_data->port);
+            if (ret < 0) {
+                rtapi_print_msg(RTAPI_MSG_ERR, "%s: ERROR: Network reset failed\n", COMP_NAME);
+                ldcn_serial_close(hal_data->port);
+                hal_exit(hal_data->comp_id);
+                return -1;
+            }
+
+            /* Close and reopen at 19200 for second reset */
+            ldcn_serial_close(hal_data->port);
+            usleep(1000000);  /* 1s delay */
+
+            rtapi_print_msg(RTAPI_MSG_INFO,
+                           "%s: Reopening at 19200 baud...\n", COMP_NAME);
             hal_data->port = ldcn_serial_open(hal_data->port_name, 19200);
             if (!hal_data->port) {
                 rtapi_print_msg(RTAPI_MSG_ERR,
@@ -903,6 +917,16 @@ int main(int argc, char **argv) {
                 hal_exit(hal_data->comp_id);
                 return -1;
             }
+        }
+
+        /* Now send hard reset at 19200 to ensure clean state */
+        rtapi_print_msg(RTAPI_MSG_INFO, "%s: Sending hard reset at 19200 baud...\n", COMP_NAME);
+        ret = hard_reset_network(hal_data->port);
+        if (ret < 0) {
+            rtapi_print_msg(RTAPI_MSG_ERR, "%s: ERROR: Network reset failed\n", COMP_NAME);
+            ldcn_serial_close(hal_data->port);
+            hal_exit(hal_data->comp_id);
+            return -1;
         }
     }
 
@@ -956,7 +980,11 @@ int main(int argc, char **argv) {
     }
 
     /* Phase 7: Wait for power button press (HIIL - Human In The Loop) */
-    if (hal_data->do_wait_power || hal_data->do_full_init) {
+    /* Hardware requires power button press for proper initialization */
+    fprintf(stderr, "DEBUG: do_wait_power=%d, do_full_init=%d\n",
+            hal_data->do_wait_power, hal_data->do_full_init);
+    if (hal_data->do_wait_power) {
+        fprintf(stderr, "DEBUG: Calling wait_for_power()\n");
         ret = wait_for_power(hal_data->port);
         if (ret < 0) {
             rtapi_print_msg(RTAPI_MSG_ERR, "%s: ERROR: Power wait failed or timed out\n", COMP_NAME);
@@ -964,6 +992,8 @@ int main(int argc, char **argv) {
             hal_exit(hal_data->comp_id);
             return -1;
         }
+    } else {
+        fprintf(stderr, "DEBUG: Skipping wait_for_power()\n");
     }
 
     /* Phase 8: Initialize servo drives */

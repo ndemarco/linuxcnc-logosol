@@ -277,7 +277,20 @@ int ldcn_serial_recv_status(ldcn_serial_port_t *port, ldcn_status_packet_t *stat
             bytes_read++;
         }
     }
-    
+
+    /* Debug: print hex dump of received data */
+    if (bytes_read > 0) {
+        fprintf(stderr, "RX (%d bytes): ", bytes_read);
+        fprintf(stderr, "%02x", status->status);
+        for (int i = 0; i < status->data_len; i++) {
+            fprintf(stderr, "%02x", status->data[i]);
+        }
+        if (bytes_read > status->data_len + 1) {
+            fprintf(stderr, "%02x", status->checksum);
+        }
+        fprintf(stderr, "\n");
+    }
+
     return bytes_read;
 }
 
