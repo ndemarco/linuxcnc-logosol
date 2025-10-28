@@ -21,7 +21,6 @@
 
 #include "hal.h"
 #include "rtapi.h"
-#include "rtapi_app.h"
 #include "rtapi_string.h"
 
 #include "ldcn_protocol.h"
@@ -54,7 +53,7 @@ typedef struct {
     hal_bit_t *fault;
     hal_bit_t *amp_enabled;
     
-    /* Parameters */
+    /* Parameters (stored in HAL shared memory, not local pointers) */
     hal_float_t scale;
     hal_u32_t kp;
     hal_u32_t kd;
@@ -226,7 +225,7 @@ static void update_axis(int axis_num) {
     if (*axis->enable) {
         /* Convert from machine units to encoder counts */
         int32_t pos_counts = (int32_t)(*axis->pos_cmd * axis->scale);
-        
+
         /* Convert velocity and acceleration */
         uint32_t vel_raw = ldcn_velocity_to_raw(*axis->vel_cmd * axis->scale,
                                                 hal_data->servo_rate_divisor);
@@ -330,22 +329,22 @@ static int export_axis(int num) {
                               "%s.%d.scale", COMP_NAME, num);
     if (ret != 0) return ret;
     axis->scale = 1.0;  /* Default scale */
-    
+
     ret = hal_param_u32_newf(HAL_RW, &axis->kp, hal_data->comp_id,
                             "%s.%d.kp", COMP_NAME, num);
     if (ret != 0) return ret;
     axis->kp = 50;
-    
+
     ret = hal_param_u32_newf(HAL_RW, &axis->kd, hal_data->comp_id,
                             "%s.%d.kd", COMP_NAME, num);
     if (ret != 0) return ret;
     axis->kd = 8000;
-    
+
     ret = hal_param_u32_newf(HAL_RW, &axis->ki, hal_data->comp_id,
                             "%s.%d.ki", COMP_NAME, num);
     if (ret != 0) return ret;
     axis->ki = 50;
-    
+
     ret = hal_param_u32_newf(HAL_RO, &axis->address, hal_data->comp_id,
                             "%s.%d.address", COMP_NAME, num);
     if (ret != 0) return ret;
@@ -450,7 +449,7 @@ int main(int argc, char **argv) {
                           "%s: ERROR: Failed to export axis %d\n",
                           COMP_NAME, i);
             hal_exit(hal_data->comp_id);
-            free(hal_data->axes);
+            /* Note: axes allocated with hal_malloc, freed by hal_exit */
             free(hal_data);
             return -1;
         }
@@ -503,7 +502,7 @@ int main(int argc, char **argv) {
                           COMP_NAME, i);
             ldcn_serial_close(hal_data->port);
             hal_exit(hal_data->comp_id);
-            free(hal_data->axes);
+            /* Note: axes allocated with hal_malloc, freed by hal_exit */
             free(hal_data);
             return -1;
         }
@@ -548,7 +547,7 @@ int main(int argc, char **argv) {
                           COMP_NAME, hal_data->baud_rate);
             ldcn_serial_close(hal_data->port);
             hal_exit(hal_data->comp_id);
-            free(hal_data->axes);
+            /* Note: axes allocated with hal_malloc, freed by hal_exit */
             free(hal_data);
             return -1;
         }
@@ -566,7 +565,7 @@ int main(int argc, char **argv) {
                           COMP_NAME, hal_data->baud_rate);
             ldcn_serial_close(hal_data->port);
             hal_exit(hal_data->comp_id);
-            free(hal_data->axes);
+            /* Note: axes allocated with hal_malloc, freed by hal_exit */
             free(hal_data);
             return -1;
         }
