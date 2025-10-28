@@ -316,7 +316,12 @@ bool ldcn_parse_status(const ldcn_status_packet_t *pkt, ldcn_drive_status_t *sta
     if (expected_fields & LDCN_STATUS_SEND_BUFFER_CNT) {
         status->buffer_count = pkt->data[idx++];
     }
-    
+
+    if (expected_fields & LDCN_STATUS_SEND_DIG_IN) {
+        status->digital_inputs = pkt->data[idx] | (pkt->data[idx+1] << 8);
+        idx += 2;
+    }
+
     return true;
 }
 

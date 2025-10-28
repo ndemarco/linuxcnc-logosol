@@ -1,0 +1,5 @@
+; Tool table for Logosol Sawmill
+; Format: Pocket Tool Diameter Offset Comment
+; Example: T1 P1 D25.4 Z0.0 ;1/4 inch cutter
+
+T0 P0 ;no tool

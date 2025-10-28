@@ -45,4 +45,11 @@ int ldcn_serial_set_baud(ldcn_serial_port_t *port, int baud_rate);
 /* Get file descriptor (for select/poll) */
 int ldcn_serial_get_fd(ldcn_serial_port_t *port);
 
+/* Set debug level for serial communication
+ * 0 = errors only
+ * 1 = normal (high-level status messages)
+ * 2 = verbose (show all TX/RX hex dumps)
+ */
+void ldcn_serial_set_debug(int level);
+
 #endif /* LDCN_SERIAL_H */

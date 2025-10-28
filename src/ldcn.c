@@ -79,6 +79,7 @@ typedef struct {
     /* Configuration */
     char port_name[256];
     int baud_rate;
+    int debug_level;            /* 0=errors only, 1=normal, 2=verbose TX/RX */
     uint8_t servo_rate_divisor;
     bool path_mode;
     uint16_t path_buffer_freq;
@@ -93,6 +94,12 @@ typedef struct {
     bool do_wait_power;
     bool do_init_servos;
     bool do_full_init;  /* Run all phases */
+
+    /* E-stop monitoring */
+    hal_bit_t *estop_ok;        /* OUT: TRUE when system is NOT in E-stop */
+    hal_u32_t *din_raw;         /* OUT: Raw digital input word from supervisor */
+    hal_bit_t *homing_active;   /* OUT: TRUE when any axis is homing */
+    ldcn_drive_status_t supervisor_status;  /* Supervisor status cache */
 
     /* Runtime state */
     bool running;
@@ -154,14 +161,20 @@ static int detect_baud_rate(const char *port_name) {
     int num_rates = sizeof(baud_rates) / sizeof(baud_rates[0]);
 
     rtapi_print_msg(RTAPI_MSG_INFO, "%s: Auto-detecting current baud rate...\n", COMP_NAME);
+    fprintf(stderr, "%s: Auto-detecting baud rate...\n", COMP_NAME);
+    fflush(stderr);
 
     for (int i = 0; i < num_rates; i++) {
         rtapi_print_msg(RTAPI_MSG_INFO, "%s: Trying %d baud...\n",
                        COMP_NAME, baud_rates[i]);
+        fprintf(stderr, "%s: Trying %d baud...\n", COMP_NAME, baud_rates[i]);
+        fflush(stderr);
         if (try_baud_rate(port_name, baud_rates[i]) >= 0) {
             rtapi_print_msg(RTAPI_MSG_INFO,
                           "%s: Found devices at %d baud\n",
                           COMP_NAME, baud_rates[i]);
+            fprintf(stderr, "%s: Found devices at %d baud\n", COMP_NAME, baud_rates[i]);
+            fflush(stderr);
             return baud_rates[i];
         }
     }
@@ -169,6 +182,8 @@ static int detect_baud_rate(const char *port_name) {
     rtapi_print_msg(RTAPI_MSG_WARN,
                    "%s: No devices found at any common baud rate, assuming 19200\n",
                    COMP_NAME);
+    fprintf(stderr, "%s: No devices found, assuming 19200 baud\n", COMP_NAME);
+    fflush(stderr);
     return 19200;
 }
 
@@ -177,11 +192,16 @@ static int hard_reset_network(ldcn_serial_port_t *port) {
     ldcn_cmd_packet_t cmd;
 
     rtapi_print_msg(RTAPI_MSG_INFO, "%s: Hard reset all LDCN devices...\n", COMP_NAME);
+    fprintf(stderr, "%s: Sending hard reset to all devices...\n", COMP_NAME);
+    fflush(stderr);
 
     ldcn_cmd_hard_reset(&cmd, LDCN_ADDR_BROADCAST);
     ldcn_serial_send_command(port, &cmd);
 
     usleep(2000000);  /* 2 second delay for reset to complete */
+
+    fprintf(stderr, "%s: Reset complete (devices at 19200 baud)\n", COMP_NAME);
+    fflush(stderr);
 
     return 0;
 }
@@ -217,6 +237,8 @@ static int assign_device_addresses(ldcn_serial_port_t *port, int num_devices) {
 
     rtapi_print_msg(RTAPI_MSG_INFO, "%s: Assigning addresses to %d devices...\n",
                    COMP_NAME, num_devices);
+    fprintf(stderr, "%s: Assigning addresses to %d devices...\n", COMP_NAME, num_devices);
+    fflush(stderr);
 
     for (int i = 1; i <= num_devices; i++) {
         /* SET_ADDRESS command: old_addr=0x00, new_addr=i, group=0xFF */
@@ -225,6 +247,8 @@ static int assign_device_addresses(ldcn_serial_port_t *port, int num_devices) {
 
         if (ret >= 0) {
             rtapi_print_msg(RTAPI_MSG_INFO, "%s: Device %d: ✓\n", COMP_NAME, i);
+            fprintf(stderr, "%s: Device %d addressed\n", COMP_NAME, i);
+            fflush(stderr);
         } else {
             rtapi_print_msg(RTAPI_MSG_WARN, "%s: Device %d: ✗\n", COMP_NAME, i);
         }
@@ -296,6 +320,8 @@ static int upgrade_baud_rate(ldcn_serial_port_t **port_ptr, const char *port_nam
 
     rtapi_print_msg(RTAPI_MSG_INFO, "%s: Upgrading from %d to %d baud...\n",
                    COMP_NAME, from_baud, to_baud);
+    fprintf(stderr, "%s: Upgrading from %d to %d baud...\n", COMP_NAME, from_baud, to_baud);
+    fflush(stderr);
 
     /* Send baud change command to all devices */
     ldcn_cmd_set_baud(&cmd, baud_code);
@@ -317,6 +343,8 @@ static int upgrade_baud_rate(ldcn_serial_port_t **port_ptr, const char *port_nam
     *port_ptr = new_port;
 
     rtapi_print_msg(RTAPI_MSG_INFO, "%s: Reopened at %d baud\n", COMP_NAME, to_baud);
+    fprintf(stderr, "%s: Communication upgraded to %d baud\n", COMP_NAME, to_baud);
+    fflush(stderr);
     return 0;
 }
 
@@ -327,12 +355,17 @@ static int configure_supervisor(ldcn_serial_port_t *port) {
 
     rtapi_print_msg(RTAPI_MSG_INFO, "%s: Configuring supervisor (device %d)...\n",
                    COMP_NAME, SUPERVISOR_ADDR);
+    fprintf(stderr, "%s: Configuring supervisor for status reporting...\n", COMP_NAME);
+    fflush(stderr);
 
     /* Send DEFINE_STATUS with 0xFFFF (all status bits) */
     ldcn_cmd_define_status(&cmd, SUPERVISOR_ADDR, 0xFFFF);
     ldcn_serial_send_command(port, &cmd);
 
     usleep(1000000);  /* 1 second for configuration */
+
+    fprintf(stderr, "%s: Supervisor configured\n", COMP_NAME);
+    fflush(stderr);
 
     return 0;
 }
@@ -368,10 +401,15 @@ static int wait_for_power(ldcn_serial_port_t *port) {
         usleep(200000);
     }
 
-    rtapi_print_msg(RTAPI_MSG_INFO, "%s: Monitoring for power on...\n", COMP_NAME);
+    fprintf(stderr, "%s: Waiting for power button press...\n", COMP_NAME);
+    fprintf(stderr, "%s: (Press Ctrl+C to abort)\n", COMP_NAME);
+    fflush(stderr);
 
-    /* Poll for up to 60 seconds */
-    for (int i = 0; i < 120; i++) {
+    /* Poll indefinitely until power on or external abort (Ctrl+C) */
+    /* Note: E-stop monitoring is NOT needed here - it's a hardware safety function.
+     * The supervisor hardware prevents power-on when E-stop is active. */
+    int poll_count = 0;
+    while (!done) {  /* done flag set by signal handler */
         ldcn_build_command(&cmd, SUPERVISOR_ADDR, LDCN_CMD_NOP, NULL, 0);
         int ret = ldcn_serial_exchange(port, &cmd, &status, 200);
 
@@ -380,16 +418,16 @@ static int wait_for_power(ldcn_serial_port_t *port) {
             uint8_t current_status = status.data[0];
 
             /* Print every 10th poll or when status changes */
-            if (i % 10 == 0 || current_status != last_status) {
+            if (poll_count % 10 == 0 || current_status != last_status) {
                 rtapi_print_msg(RTAPI_MSG_INFO, "%s: [%3d] Status: 0x%02X, Power bit: %d\n",
-                              COMP_NAME, i, current_status, !!(current_status & 0x08));
+                              COMP_NAME, poll_count, current_status,
+                              !!(current_status & 0x08));
             }
 
             /* Check if power bit (bit 3) is now set */
             if (current_status != last_status && (current_status & 0x08)) {
-                rtapi_print_msg(RTAPI_MSG_INFO,
-                              "%s: !!! POWER IS NOW ON (0x%02X -> 0x%02X) !!!\n",
-                              COMP_NAME, last_status, current_status);
+                fprintf(stderr, "%s: Power button pressed - power is ON\n", COMP_NAME);
+                fflush(stderr);
                 power_detected = 1;
                 break;
             }
@@ -397,7 +435,14 @@ static int wait_for_power(ldcn_serial_port_t *port) {
             last_status = current_status;
         }
 
+        poll_count++;
         usleep(500000);  /* Poll every 500ms */
+    }
+
+    /* Check if we exited due to signal */
+    if (done) {
+        rtapi_print_msg(RTAPI_MSG_INFO, "%s: ✗ Abort signal received during power wait\n", COMP_NAME);
+        return -1;
     }
 
     if (power_detected) {
@@ -582,8 +627,74 @@ static void update_axis(int axis_num) {
     }
 }
 
+/* Update supervisor status and E-stop monitoring */
+static void update_supervisor(void) {
+    ldcn_cmd_packet_t cmd;
+    ldcn_status_packet_t status_pkt;
+    int ret;
+
+    /* Request digital inputs from supervisor */
+    uint16_t status_bits = LDCN_STATUS_SEND_DIG_IN;
+    ldcn_cmd_read_status(&cmd, SUPERVISOR_ADDR, status_bits);
+
+    ret = ldcn_serial_exchange(hal_data->port, &cmd, &status_pkt, 50);
+    if (ret > 0) {
+        /* Parse supervisor status */
+        if (ldcn_parse_status(&status_pkt, &hal_data->supervisor_status, status_bits)) {
+            /* Update raw digital input pin */
+            *hal_data->din_raw = hal_data->supervisor_status.digital_inputs;
+
+            /* E-stop state comes from the status byte, not digital inputs
+             * When E-stop is active, power_on flag will be false
+             * estop_ok should be TRUE when E-stop is NOT active (power_on = true) */
+            bool prev_estop_ok = *hal_data->estop_ok;
+            *hal_data->estop_ok = hal_data->supervisor_status.power_on;
+
+            /* Print message when E-stop state changes
+             * Only show "E-STOP PRESSED" when transitioning from power ON to power OFF
+             * (not during initial startup when power was never on) */
+            if (prev_estop_ok && !hal_data->supervisor_status.power_on) {
+                fprintf(stderr, "%s: !!! E-STOP PRESSED !!! (power lost)\n", COMP_NAME);
+                fflush(stderr);
+            } else if (!prev_estop_ok && hal_data->supervisor_status.power_on) {
+                fprintf(stderr, "%s: Power enabled (E-stop clear)\n", COMP_NAME);
+                fflush(stderr);
+            }
+
+            /* If E-stop is pressed (power_on = false), disable all axes */
+            if (!hal_data->supervisor_status.power_on) {
+                for (int i = 0; i < hal_data->num_axes; i++) {
+                    axis_data_t *axis = &hal_data->axes[i];
+                    if (axis->initialized && *axis->enable) {
+                        /* Send motor off command */
+                        ldcn_cmd_stop_motor(&cmd, axis->ldcn_addr, LDCN_STOP_MOTOR_OFF);
+                        ldcn_serial_send_command(hal_data->port, &cmd);
+                        /* Note: Don't modify enable pin - that's user's input
+                         * Just force the motor off in hardware */
+                    }
+                }
+            }
+        }
+    }
+
+    /* Update homing-active pin: TRUE if any axis is homing */
+    bool any_homing = false;
+    for (int i = 0; i < hal_data->num_axes; i++) {
+        axis_data_t *axis = &hal_data->axes[i];
+        if (axis->initialized && axis->status.home_in_progress) {
+            any_homing = true;
+            break;
+        }
+    }
+    *hal_data->homing_active = any_homing;
+}
+
 /* Main update loop */
 static void update_all(void) {
+    /* Update supervisor and E-stop status */
+    update_supervisor();
+
+    /* Update all axes */
     for (int i = 0; i < hal_data->num_axes; i++) {
         update_axis(i);
     }
@@ -704,6 +815,12 @@ static int parse_args(int argc, char **argv) {
             strncpy(hal_data->port_name, &argv[i][5], sizeof(hal_data->port_name) - 1);
         } else if (strncmp(argv[i], "baud=", 5) == 0) {
             hal_data->baud_rate = atoi(&argv[i][5]);
+        } else if (strncmp(argv[i], "debug=", 6) == 0) {
+            hal_data->debug_level = atoi(&argv[i][6]);
+            if (hal_data->debug_level < 0 || hal_data->debug_level > 2) {
+                fprintf(stderr, "Error: debug must be 0 (errors), 1 (normal), or 2 (verbose)\n");
+                return -1;
+            }
         } else if (strncmp(argv[i], "axes=", 5) == 0) {
             hal_data->num_axes = atoi(&argv[i][5]);
             if (hal_data->num_axes < 1 || hal_data->num_axes > LDCN_MAX_AXES) {
@@ -759,6 +876,7 @@ int main(int argc, char **argv) {
     /* Set defaults */
     strncpy(hal_data->port_name, DEFAULT_PORT, sizeof(hal_data->port_name) - 1);
     hal_data->baud_rate = DEFAULT_BAUD;
+    hal_data->debug_level = 1;  /* Default to normal messages */
     hal_data->num_axes = DEFAULT_AXES;
     hal_data->servo_rate_divisor = DEFAULT_SERVO_RATE;
     hal_data->path_mode = false;
@@ -781,6 +899,13 @@ int main(int argc, char **argv) {
         return -1;
     }
 
+    /* Set debug level for serial communication */
+    ldcn_serial_set_debug(hal_data->debug_level);
+
+    /* Setup signal handlers early so Ctrl+C works during initialization */
+    signal(SIGINT, quit);
+    signal(SIGTERM, quit);
+
     /* Determine initialization mode: if no specific phases requested, do full init */
     if (!hal_data->do_detect_baud && !hal_data->do_reset &&
         !hal_data->do_discover && !hal_data->do_assign &&
@@ -789,7 +914,6 @@ int main(int argc, char **argv) {
         hal_data->do_full_init = true;
         /* Full init requires power-wait for hardware to be ready */
         hal_data->do_wait_power = true;
-        fprintf(stderr, "DEBUG: Setting do_wait_power=1 during full_init setup\n");
     }
 
     /* Initialize HAL */
@@ -841,7 +965,35 @@ int main(int argc, char **argv) {
             return -1;
         }
     }
-    
+
+    /* Export global E-stop monitoring pins */
+    ret = hal_pin_bit_newf(HAL_OUT, &hal_data->estop_ok, hal_data->comp_id,
+                          "%s.estop-ok", COMP_NAME);
+    if (ret != 0) {
+        rtapi_print_msg(RTAPI_MSG_ERR, "%s: ERROR: Failed to export estop-ok pin\n", COMP_NAME);
+        hal_exit(hal_data->comp_id);
+        return -1;
+    }
+    *hal_data->estop_ok = 0;  /* Start as FALSE until power is on */
+
+    ret = hal_pin_u32_newf(HAL_OUT, &hal_data->din_raw, hal_data->comp_id,
+                          "%s.din-raw", COMP_NAME);
+    if (ret != 0) {
+        rtapi_print_msg(RTAPI_MSG_ERR, "%s: ERROR: Failed to export din-raw pin\n", COMP_NAME);
+        hal_exit(hal_data->comp_id);
+        return -1;
+    }
+    *hal_data->din_raw = 0;
+
+    ret = hal_pin_bit_newf(HAL_OUT, &hal_data->homing_active, hal_data->comp_id,
+                          "%s.homing-active", COMP_NAME);
+    if (ret != 0) {
+        rtapi_print_msg(RTAPI_MSG_ERR, "%s: ERROR: Failed to export homing-active pin\n", COMP_NAME);
+        hal_exit(hal_data->comp_id);
+        return -1;
+    }
+    *hal_data->homing_active = 0;
+
     /* Ready */
     hal_ready(hal_data->comp_id);
     
@@ -981,10 +1133,7 @@ int main(int argc, char **argv) {
 
     /* Phase 7: Wait for power button press (HIIL - Human In The Loop) */
     /* Hardware requires power button press for proper initialization */
-    fprintf(stderr, "DEBUG: do_wait_power=%d, do_full_init=%d\n",
-            hal_data->do_wait_power, hal_data->do_full_init);
     if (hal_data->do_wait_power) {
-        fprintf(stderr, "DEBUG: Calling wait_for_power()\n");
         ret = wait_for_power(hal_data->port);
         if (ret < 0) {
             rtapi_print_msg(RTAPI_MSG_ERR, "%s: ERROR: Power wait failed or timed out\n", COMP_NAME);
@@ -992,14 +1141,14 @@ int main(int argc, char **argv) {
             hal_exit(hal_data->comp_id);
             return -1;
         }
-    } else {
-        fprintf(stderr, "DEBUG: Skipping wait_for_power()\n");
     }
 
     /* Phase 8: Initialize servo drives */
     if (hal_data->do_init_servos || hal_data->do_full_init) {
         rtapi_print_msg(RTAPI_MSG_INFO, "%s: Initializing %d servo drives...\n",
                        COMP_NAME, hal_data->num_axes);
+        fprintf(stderr, "%s: Initializing %d servo drive(s)...\n", COMP_NAME, hal_data->num_axes);
+        fflush(stderr);
         for (int i = 0; i < hal_data->num_axes; i++) {
             if (init_drive(i) < 0) {
                 rtapi_print_msg(RTAPI_MSG_ERR,
@@ -1009,7 +1158,11 @@ int main(int argc, char **argv) {
                 hal_exit(hal_data->comp_id);
                 return -1;
             }
+            fprintf(stderr, "%s: Axis %d initialized\n", COMP_NAME, i);
+            fflush(stderr);
         }
+        fprintf(stderr, "%s: All servo drives initialized\n", COMP_NAME);
+        fflush(stderr);
     }
     
     /* Setup signal handlers */
@@ -1019,7 +1172,10 @@ int main(int argc, char **argv) {
     /* Main loop - run at ~1ms (1000 Hz) */
     hal_data->running = true;
     rtapi_print_msg(RTAPI_MSG_INFO, "%s: Entering main loop\n", COMP_NAME);
-    
+    fprintf(stderr, "%s: Initialization complete - entering control loop\n", COMP_NAME);
+    fprintf(stderr, "%s: Monitoring E-stop and updating axes at 1kHz\n", COMP_NAME);
+    fflush(stderr);
+
     while (!done) {
         update_all();
         usleep(1000);  /* 1ms update rate */

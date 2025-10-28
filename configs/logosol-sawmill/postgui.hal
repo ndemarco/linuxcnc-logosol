@@ -1,0 +1,12 @@
+# Post-GUI HAL Configuration
+# This file is loaded after the GUI starts
+# Use it for GUI-specific connections
+
+# Example: Connect halui pins to GUI buttons
+# net mdi-0 halui.mdi-command-00 <= (your button)
+
+# Example: Connect override controls to GUI sliders
+# net fo-value halui.feed-override.value <= (your slider)
+
+# Example: Display current state
+# net current-vel motion.current-vel => (your display)

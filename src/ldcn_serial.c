@@ -19,6 +19,9 @@
 #include <sys/ioctl.h>
 #include <linux/serial.h>
 
+/* Debug level: 0=errors only, 1=normal, 2=verbose TX/RX */
+static int debug_level = 1;
+
 /* Serial Port Structure */
 struct ldcn_serial_port {
     int fd;
@@ -181,12 +184,14 @@ int ldcn_serial_send_command(ldcn_serial_port_t *port, const ldcn_cmd_packet_t *
 
     buffer[len++] = cmd->checksum;
 
-    /* Debug: print hex dump */
-    fprintf(stderr, "TX (%d bytes): ", len);
-    for (int i = 0; i < len; i++) {
-        fprintf(stderr, "%02x", buffer[i]);
+    /* Debug: print hex dump (only at verbose level) */
+    if (debug_level >= 2) {
+        fprintf(stderr, "TX (%d bytes): ", len);
+        for (int i = 0; i < len; i++) {
+            fprintf(stderr, "%02x", buffer[i]);
+        }
+        fprintf(stderr, "\n");
     }
-    fprintf(stderr, "\n");
 
     /* Send packet */
     int sent = write(port->fd, buffer, len);
@@ -199,7 +204,9 @@ int ldcn_serial_send_command(ldcn_serial_port_t *port, const ldcn_cmd_packet_t *
         fprintf(stderr, "Warning: partial write (%d of %d bytes)\n", sent, len);
     }
 
-    fprintf(stderr, "  -> wrote %d bytes to fd=%d\n", sent, port->fd);
+    if (debug_level >= 2) {
+        fprintf(stderr, "  -> wrote %d bytes to fd=%d\n", sent, port->fd);
+    }
 
     /* Drain output to ensure transmission */
     tcdrain(port->fd);
@@ -278,8 +285,8 @@ int ldcn_serial_recv_status(ldcn_serial_port_t *port, ldcn_status_packet_t *stat
         }
     }
 
-    /* Debug: print hex dump of received data */
-    if (bytes_read > 0) {
+    /* Debug: print hex dump of received data (only at verbose level) */
+    if (debug_level >= 2 && bytes_read > 0) {
         fprintf(stderr, "RX (%d bytes): ", bytes_read);
         fprintf(stderr, "%02x", status->status);
         for (int i = 0; i < status->data_len; i++) {
@@ -380,4 +387,9 @@ int ldcn_serial_set_baud(ldcn_serial_port_t *port, int baud_rate) {
 /* Get file descriptor */
 int ldcn_serial_get_fd(ldcn_serial_port_t *port) {
     return port ? port->fd : -1;
+}
+
+/* Set debug level */
+void ldcn_serial_set_debug(int level) {
+    debug_level = level;
 }

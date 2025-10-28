@@ -1,0 +1,9 @@
+# Shutdown HAL Configuration
+# This file is executed when LinuxCNC shuts down
+# Use it to ensure clean shutdown of hardware
+
+# The LDCN driver automatically disables all axes on shutdown
+# No additional commands needed for basic shutdown
+
+# Example: Set outputs to safe state
+# (When digital outputs are implemented)

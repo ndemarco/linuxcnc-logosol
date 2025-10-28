@@ -164,7 +164,8 @@ typedef struct {
     int16_t following_error;    /* Position error */
     uint8_t buffer_count;       /* Path points in buffer */
     uint8_t ad_value;           /* A/D value */
-    
+    uint16_t digital_inputs;    /* Digital input status (2 bytes) */
+
     /* Device info */
     uint8_t device_id;
     uint8_t version;

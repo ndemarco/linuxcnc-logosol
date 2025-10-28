@@ -1,0 +1,12 @@
+# Custom HAL Configuration
+# Add your custom HAL connections here
+# This file is loaded after the main logosol.hal
+
+# Example: Custom digital input connections
+# net probe-in ldcn.din-raw => motion.probe-input
+
+# Example: Custom output connections
+# (When digital outputs are implemented)
+
+# Example: Custom override controls
+# (Add jog pendant, feed override controls, etc.)
