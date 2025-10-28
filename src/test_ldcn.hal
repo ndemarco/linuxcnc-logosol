@@ -1,0 +1,19 @@
+# Test HAL configuration for LDCN driver
+# Usage: halrun -I test_ldcn.hal
+
+# Load the ldcn driver
+# Driver will:
+# 1. Open port at 19200 baud
+# 2. Reset all devices
+# 3. Initialize drives
+# 4. Upgrade to 125000 baud
+loadusr -W ldcn port=/dev/ttyUSB0 baud=125000 axes=1
+
+# Show the pins that were created
+show pin ldcn
+
+# Show the parameters
+show param ldcn
+
+# Wait for user to press Ctrl+C
+waitusr ldcn

@@ -25,13 +25,34 @@ sudo usermod -a -G dialout $USER
 
 ## Step 3: Test Driver (2 minutes)
 
+**Option A: Quick Test Script**
 ```bash
-# Driver starts at 19200 and upgrades to target baud automatically
-./ldcn port=/dev/ttyUSB0 baud=125000 axes=1
-# Press Ctrl+C to stop
+cd src
+./test_init.sh
+# Watch for initialization messages, press Ctrl+C to stop
+```
 
-# Or stay at default 19200 (slower but more reliable over long cables)
-./ldcn port=/dev/ttyUSB0 baud=19200 axes=1
+**Option B: Manual Test with halrun**
+```bash
+cd src
+halrun -I
+# In halrun prompt:
+halcmd: loadusr -W ldcn port=/dev/ttyUSB0 baud=125000 axes=1
+halcmd: show pin ldcn
+# Press Ctrl+D to exit
+```
+
+**What You Should See:**
+```
+ldcn: Opening /dev/ttyUSB0 at 19200 baud (LDCN default)
+ldcn: Resetting all LDCN devices...
+ldcn: Initializing 1 drives at 19200 baud...
+ldcn: Initializing axis 0 (addr 0x01)
+ldcn: Axis 0 initialized successfully
+ldcn: Upgrading communication speed to 125000 baud...
+ldcn: Verifying communication at 125000 baud...
+ldcn: Successfully upgraded to 125000 baud
+ldcn: Entering main loop
 ```
 
 ## Step 4: Calculate Your Scale (2 minutes)
