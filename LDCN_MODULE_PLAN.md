@@ -35,16 +35,38 @@ SK2310g2 (supervisor subclass)
 
 ## Phase 1: Survey (Understanding Existing Code)
 
-### Task 1.1: List all Python files in ./utilities/
-**Status:** Pending
-**Output:** List of Python files with brief description
+### Task 1.1: Clean up directory structure
+**Status:** ✅ COMPLETED
+**Actions Taken:**
+- Merged `utilities/` into `utils/`
+- Kept `utils/` (has superior ldcn_diagnostic.py with fault monitoring)
+- Moved `test_position_command.py` to `utils/`
+- Moved `test_servo_init.py` to `utils/`
+- Deleted duplicate `utilities/` directory
 
-### Task 1.2: Extract functions from each utility file
-**Status:** Pending
-**Method:** Read each file, list all functions with signatures
-**Output:** Function inventory document
+**Result:** All Python utilities now in `/home/nick/projects/linuxcnc-logosol/utils/`
 
-### Task 1.3: Categorize functions
+### Task 1.2: Create Python file inventory
+**Status:** ✅ COMPLETED
+**Output:** `PYTHON_FILE_INVENTORY.md` created with:
+- 5 Python files documented
+- Key classes and methods identified
+- Common protocol constants extracted
+- Device addressing scheme documented
+
+**Files:**
+1. `ldcn_diagnostic.py` - Diagnostic utility with fault monitoring
+2. `ldcn_init.py` - Network initialization
+3. `ldcn_monitor.py` - Real-time status monitoring
+4. `test_servo_init.py` - Servo initialization testing
+5. `test_position_command.py` - Position command testing
+
+### Task 1.3: Extract functions from test files
+**Status:** Pending
+**Method:** Read test_servo_init.py and test_position_command.py, extract all functions
+**Output:** Add to function inventory
+
+### Task 1.4: Categorize functions
 **Status:** Pending
 **Categories:**
 - **Protocol-level:** Serial communication, checksums, packet building
@@ -233,9 +255,20 @@ net.close()
 
 ## Progress Tracking
 
-**Phase 1:** Not started
+**Phase 1:** 🟡 In Progress (Task 1.1 ✅, Task 1.2 ✅, Task 1.3 pending)
 **Phase 2:** Not started
 **Phase 3:** Not started
 **Phase 4:** Not started
 
 **Last Updated:** 2025-10-29
+
+---
+
+## Change Log
+
+### 2025-10-29 08:25
+- ✅ Merged utilities/ into utils/ directory
+- ✅ Moved test files to utils/
+- ✅ Created PYTHON_FILE_INVENTORY.md
+- 📝 Identified 5 Python files for refactoring
+- 📝 Documented common protocol patterns
