@@ -57,18 +57,13 @@ LDCN is a master-slave serial protocol using RS-485 physical layer. The PC (mast
 | 625000    | 0x07      | High-speed |
 | 1250000   | 0x03      | Maximum |
 
-## Commands
+## Generic LDCN Commands
 
-### 0x0 - Reset Position
+The following commands are part of the base LDCN protocol and supported by **all device types** (servo drives, I/O controllers, etc.).
 
-Resets the 32-bit encoder counter to zero.
-
-**Data**: None
-
-**Example**:
-```
-AA 01 00 01  # Reset position on device 1
-```
+Device-specific commands (e.g., Load Trajectory, Load Gains for servos) are documented separately:
+- Servo Drive Commands: See `SERVO_COMMANDS.md`
+- I/O Controller Commands: See hardware manual
 
 ### 0x1 - Set Address
 
@@ -120,27 +115,6 @@ AA 06 22 FF FF 26  # Device 6, request all status data (0xFFFF)
 
 Like Define Status, but only affects the immediate response (non-permanent).
 
-### 0x7 - Stop Motor
-
-Stops servo motor and controls amplifier enable state.
-
-**Data**:
-- Byte 0: Stop mode flags
-
-**Stop Mode Flags**:
-| Bit | Function |
-|-----|----------|
-| 0   | Stop abruptly |
-| 1   | Stop smoothly |
-| 2   | Motor off (disable position servo) |
-| 4   | Amplifier enable |
-
-**Examples**:
-```
-AA 01 17 05 1D  # Enable amplifier, stop abruptly (enable drive)
-AA 01 17 04 1C  # Motor off (disable drive)
-```
-
 ### 0xA - Set Baud Rate
 
 Changes baud rate of all devices. **Group command only** (no status response).
@@ -190,38 +164,19 @@ AA FF 0F 0E  # Reset all devices (group command)
 - Typically sent to group address 0xFF to reset all devices
 - Wait 2 seconds after reset before communicating
 
-## Status Byte (Servo Drives)
+## Status Byte Interpretation
 
+The meaning of status byte bits and auxiliary status data is **device-specific**:
+
+- **Servo Drives (LS-231SE)**: See `SERVO_COMMANDS.md` for status bit definitions
+- **I/O Controller (SK-2310g2)**: See `docs/logosol/LS-2310g2-Supervisor-IO-Controller.pdf`
+
+**Common Status Bits** (most devices):
 | Bit | Name | Description |
 |-----|------|-------------|
-| 0   | move_done | Clear during motion |
 | 1   | cksum_error | Checksum error in received packet |
-| 2   | current_limit | Current limiting active |
-| **3** | **power_on** | **Power enabled** |
-| 4   | pos_error | Position error exceeded limit |
-| 5   | home_source | Home source or diagnostic bit |
-| 6   | limit2 | Forward limit or diagnostic bit |
-| 7   | home_in_progress | Searching for home position |
 
-### Status Byte (I/O Controller - 2310g2)
-
-For the I/O controller, the status byte changes meaning based on configuration. When full status is requested (Define Status 0xFFFF), the status byte is at **index 1** of the response (not index 0).
-
-**Power-On Detection**: Bit 3 of status byte indicates power state:
-- `0x04` = Power OFF
-- `0x0C` = Power ON
-
-## Auxiliary Status Byte
-
-| Bit | Name | Description |
-|-----|------|-------------|
-| 0   | index | Compliment of index input |
-| 1   | pos_wrap | 32-bit position counter wrapped |
-| 2   | servo_on | Position servo enabled |
-| 3   | accel_done | Acceleration phase complete |
-| 4   | slew_done | Slew portion complete |
-| 5   | servo_overrun | Servo calculation overrun |
-| 6   | path_mode | Executing path |
+**Note**: The additional status data returned depends on the Define Status configuration and is device-specific.
 
 ## Initialization Sequence
 
