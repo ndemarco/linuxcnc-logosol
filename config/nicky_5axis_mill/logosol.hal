@@ -1,0 +1,266 @@
+# HAL Configuration for Nicky 5-Axis Mill (Logosol LS-2310g2)
+# 5-axis XYZAC with LDCN servo drives
+
+#******************************************
+# Core Components
+#******************************************
+
+# Load kinematics and motion controller
+loadrt [KINS]KINEMATICS
+loadrt [EMCMOT]EMCMOT servo_period_nsec=[EMCMOT]SERVO_PERIOD num_joints=[KINS]JOINTS
+
+# Add motion functions to servo thread
+addf motion-command-handler servo-thread
+addf motion-controller servo-thread
+
+# Load LDCN driver (userspace component)
+# Port: Serial device (typically /dev/ttyUSB0)
+# Axes: Number of servo drives (5 for XYZAC)
+# Servo_rate: Divisor for servo update rate (20 = 1.024ms tick time)
+# Debug: Message level (0=errors, 1=normal, 2=verbose TX/RX)
+loadusr -W ldcn port=/dev/ttyUSB0 axes=5 servo_rate=20 debug=1
+
+#******************************************
+# CRITICAL NOTE: Address Mapping
+#******************************************
+# LDCN hardware addresses DO NOT match joint order!
+# The hardware is addressed in this order per Mctl_Logosol1.ini:
+#
+#   Joint 0 (X axis) → ldcn.1 (LDCN Address 2)
+#   Joint 1 (Y axis) → ldcn.0 (LDCN Address 1)
+#   Joint 2 (Z axis) → ldcn.2 (LDCN Address 3)
+#   Joint 3 (A axis) → ldcn.3 (LDCN Address 4)
+#   Joint 4 (C axis) → ldcn.4 (LDCN Address 5)
+#
+
+#******************************************
+# Joint 0: X Axis (LDCN Address 2)
+#******************************************
+
+# PID Gains (very conservative for initial testing)
+# Original production values were: KP=10, KD=1000, KI=20
+# Starting low due to 50% output limit in binary
+setp ldcn.1.kp 2
+setp ldcn.1.kd 50
+setp ldcn.1.ki 0
+
+# Scale: 2000 counts/mm (10000 counts/rev ÷ 5mm pitch)
+setp ldcn.1.scale 2000.0
+
+# Connect motion controller to servo drive
+net x-enable joint.0.amp-enable-out => ldcn.1.enable
+net x-pos-cmd joint.0.motor-pos-cmd => ldcn.1.position-cmd
+net x-pos-fb ldcn.1.position-fb => joint.0.motor-pos-fb
+
+# Axis status - fault signal stops motion
+net x-fault ldcn.1.fault => joint.0.amp-fault-in
+
+#******************************************
+# Joint 1: Y Axis (LDCN Address 1)
+#******************************************
+
+# PID Gains (very conservative for initial testing)
+# Original production values were: KP=10, KD=1000, KI=20
+# Starting low due to 50% output limit in binary
+setp ldcn.0.kp 2
+setp ldcn.0.kd 50
+setp ldcn.0.ki 0
+
+# Scale: 2000 counts/mm (10000 counts/rev ÷ 5mm pitch)
+setp ldcn.0.scale 2000.0
+
+# Connect motion controller to servo drive
+net y-enable joint.1.amp-enable-out => ldcn.0.enable
+net y-pos-cmd joint.1.motor-pos-cmd => ldcn.0.position-cmd
+net y-pos-fb ldcn.0.position-fb => joint.1.motor-pos-fb
+
+# Axis status - fault signal stops motion
+net y-fault ldcn.0.fault => joint.1.amp-fault-in
+
+#******************************************
+# Joint 2: Z Axis (LDCN Address 3)
+#******************************************
+
+# PID Gains (very conservative for initial testing)
+# Original production values were: KP=10, KD=1000, KI=20
+# Starting low due to 50% output limit in binary
+setp ldcn.2.kp 2
+setp ldcn.2.kd 50
+setp ldcn.2.ki 0
+
+# Scale: 4000 counts/mm (10000 counts/rev ÷ 2.5mm pitch)
+setp ldcn.2.scale 4000.0
+
+# Connect motion controller to servo drive
+net z-enable joint.2.amp-enable-out => ldcn.2.enable
+net z-pos-cmd joint.2.motor-pos-cmd => ldcn.2.position-cmd
+net z-pos-fb ldcn.2.position-fb => joint.2.motor-pos-fb
+
+# Axis status - fault signal stops motion
+net z-fault ldcn.2.fault => joint.2.amp-fault-in
+
+#******************************************
+# Joint 3: A Axis (LDCN Address 4)
+#******************************************
+
+# PID Gains (very conservative for initial testing)
+# Original production values were: KP=110, KD=5000, KI=10
+# Starting low due to 50% output limit in binary
+setp ldcn.3.kp 10
+setp ldcn.3.kd 250
+setp ldcn.3.ki 0
+
+# Scale: 2805.56 counts/deg (10000 counts/rev × 101 gear ratio ÷ 360 deg)
+setp ldcn.3.scale 2805.555556
+
+# Connect motion controller to servo drive
+net a-enable joint.3.amp-enable-out => ldcn.3.enable
+net a-pos-cmd joint.3.motor-pos-cmd => ldcn.3.position-cmd
+net a-pos-fb ldcn.3.position-fb => joint.3.motor-pos-fb
+
+# Axis status - fault signal stops motion
+net a-fault ldcn.3.fault => joint.3.amp-fault-in
+
+#******************************************
+# Joint 4: C Axis (LDCN Address 5)
+# Note: Was labeled "AXIS_B" in Mctl_Logosol1.ini
+#******************************************
+
+# PID Gains (very conservative for initial testing)
+# Original production values were: KP=110, KD=5000, KI=10
+# Starting low due to 50% output limit in binary
+setp ldcn.4.kp 10
+setp ldcn.4.kd 250
+setp ldcn.4.ki 0
+
+# Scale: 2805.56 counts/deg (10000 counts/rev × 101 gear ratio ÷ 360 deg)
+setp ldcn.4.scale 2805.555556
+
+# Connect motion controller to servo drive
+net c-enable joint.4.amp-enable-out => ldcn.4.enable
+net c-pos-cmd joint.4.motor-pos-cmd => ldcn.4.position-cmd
+net c-pos-fb ldcn.4.position-fb => joint.4.motor-pos-fb
+
+# Axis status - fault signal stops motion
+net c-fault ldcn.4.fault => joint.4.amp-fault-in
+
+#******************************************
+# E-Stop Chain
+#******************************************
+# E-stop status comes from supervisor status byte (bit 3: power_on)
+# When E-stop is pressed, power_on = false, so estop-ok = false
+# LinuxCNC needs estop-ok = true to enable motion
+
+# External E-STOP signal from hardware
+net estop-ext ldcn.estop-ok => iocontrol.0.emc-enable-in
+
+#******************************************
+# Homing Status
+#******************************************
+# The ldcn.homing-active pin is TRUE when any axis is homing
+# This can be used to prevent certain operations during homing
+
+net homing-active ldcn.homing-active
+# (Can be connected to other logic as needed)
+
+#******************************************
+# Spindle Control
+#******************************************
+# NOTE: Requires analog I/O support to be implemented in LDCN driver
+# Spindle speed controlled by LS-2310g2 analog output 0
+# 0-10V = 5000-60000 RPM
+
+# Load scale component for spindle speed conversion
+loadrt scale names=spindle-speed-scale,spindle-fb-scale
+addf spindle-speed-scale servo-thread
+addf spindle-fb-scale servo-thread
+
+# Scale commanded speed from RPM to 0-10V
+# Input: 5000-60000 RPM, Output: 0-10V
+setp spindle-speed-scale.gain 0.000181818  # 10V / 55000 RPM range
+setp spindle-speed-scale.offset -0.909091   # Offset for 5000 RPM minimum
+
+# Scale feedback speed from 0-10V to RPM
+# Input: 0-10V, Output: 5000-60000 RPM
+setp spindle-fb-scale.gain 5500.0     # 55000 RPM / 10V
+setp spindle-fb-scale.offset 5000.0   # 5000 RPM minimum
+
+# Connect spindle commanded speed
+net spindle-cmd-rpm spindle.0.speed-out => spindle-speed-scale.in
+# TODO: Connect to ldcn.aout-0 when analog output is implemented
+# net spindle-cmd-volts spindle-speed-scale.out => ldcn.aout-0
+
+# Connect spindle actual speed feedback
+# TODO: Connect from ldcn.ain-0 when analog input is implemented
+# net spindle-fb-volts ldcn.ain-0 => spindle-fb-scale.in
+net spindle-fb-rpm spindle-fb-scale.out => spindle.0.speed-in
+
+# Spindle enable and direction
+net spindle-on spindle.0.on
+net spindle-cw spindle.0.forward
+# Note: Spindle does not support reverse
+# TODO: Connect spindle-on to digital output when implemented
+
+# Spindle at-speed signal (use tolerance window)
+net spindle-at-speed spindle.0.at-speed
+
+#******************************************
+# Digital Outputs (Air Solenoids)
+#******************************************
+# NOTE: Requires digital output support to be implemented in LDCN driver
+# LS-2310g2 provides 4 outputs for air solenoids
+
+# Output assignments (to be confirmed):
+# Output 0: Spindle air bearing (CRITICAL - must be on when spindle runs)
+# Output 1: Tool change (enable to release tool)
+# Output 2: Air blast
+# Output 3: Coolant blast
+
+# Load AND gate for spindle air bearing interlock
+loadrt and2 names=spindle-air-interlock
+addf spindle-air-interlock servo-thread
+
+# Spindle air bearing must be on whenever spindle is on or at speed
+net spindle-on => spindle-air-interlock.in0
+net spindle-at-speed => spindle-air-interlock.in1
+# TODO: Connect to ldcn.dout-0 when digital output is implemented
+# net spindle-air-bearing spindle-air-interlock.out => ldcn.dout-0
+
+# Tool change output (controlled by LinuxCNC during tool changes)
+# TODO: Connect to ldcn.dout-1 when digital output is implemented
+# net tool-change iocontrol.0.tool-change => ldcn.dout-1
+# net tool-changed iocontrol.0.tool-changed
+
+# Air blast (M7 coolant mist command)
+# TODO: Connect to ldcn.dout-2 when digital output is implemented
+# net air-blast iocontrol.0.coolant-mist => ldcn.dout-2
+
+# Coolant blast (M8 coolant flood command)
+# TODO: Connect to ldcn.dout-3 when digital output is implemented
+# net coolant-blast iocontrol.0.coolant-flood => ldcn.dout-3
+
+#******************************************
+# Digital Inputs
+#******************************************
+# The supervisor provides 16 digital inputs via ldcn.din-raw
+
+# Load individual bit pins from the raw word (when driver supports it)
+# TODO: Implement ldcn.din-NN pins for individual bits
+
+# Input 6: Tool length sensor (for automatic tool measurement)
+# TODO: Connect when individual digital input pins are implemented
+# net tool-length-sensor ldcn.din-6 => motion.probe-input
+
+# Input TBD: Machine air pressure sufficient switch
+# Assign to input 7 as placeholder (to be confirmed)
+# TODO: Connect when individual digital input pins are implemented
+# net air-pressure-ok ldcn.din-7
+
+# Air pressure interlock: disable machine if air pressure is low
+# TODO: Add logic to connect air-pressure-ok to estop chain
+
+#******************************************
+# Machine Power and Enable
+#******************************************
+# Machine is enabled when LinuxCNC and hardware both allow it
+net machine-is-enabled motion.motion-enabled

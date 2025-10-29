@@ -1,0 +1,16 @@
+# Test HAL configuration for E-stop monitoring
+# Usage: halrun -I test_estop.hal
+
+# Load the ldcn driver - skip power wait for testing
+loadusr -W ./ldcn port=/dev/ttyUSB0 baud=125000 axes=1
+
+# Show the pins including E-stop pins
+show pin ldcn
+
+# Monitor E-stop status in realtime
+# User can press E-stop button to test
+echo "E-stop monitoring active. Press E-stop button to test..."
+echo "Watch ldcn.estop-ok and ldcn.din-raw pins"
+
+# Wait for user to press Ctrl+C
+waitusr ldcn

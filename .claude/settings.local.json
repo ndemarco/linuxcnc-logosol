@@ -38,7 +38,16 @@
       "Bash(strace:*)",
       "Read(//tmp/**)",
       "Read(//sys/devices/pci0000:00/0000:00:14.0/usb3/3-5/3-5:1.0/ttyUSB0/**)",
-      "Bash(tee:*)"
+      "Bash(tee:*)",
+      "Bash(git pull:*)",
+      "Bash(GIT_SSH_COMMAND=\"ssh -i ~/.ssh/nick -o IdentitiesOnly=yes\" git fetch:*)",
+      "Bash(GIT_SSH_COMMAND=\"ssh -i ~/.ssh/nick -o IdentitiesOnly=yes\" git pull:*)",
+      "Bash(dos2unix:*)",
+      "Bash(linuxcnc:*)",
+      "Bash(halcmd -h:*)",
+      "Bash(halcmd show:*)",
+      "Bash(pdftotext:*)",
+      "Bash(cat:*)"
     ],
     "deny": [],
     "ask": []

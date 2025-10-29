@@ -1,8 +1,8 @@
-# Logosol LS-2310g2 Sawmill LinuxCNC Configuration
+# Nicky 5-Axis Mill LinuxCNC Configuration
 
 ## Overview
 
-This LinuxCNC configuration controls a 5-axis XYZAC sawmill using Logosol LDCN servo drives. The configuration is based on production-tested parameters from the original Mctl_Logosol1.ini file.
+This LinuxCNC configuration controls a 5-axis XYZAC mill using Logosol LDCN servo drives. The configuration is based on production-tested parameters from the original Mctl_Logosol1.ini file.
 
 ## Machine Specifications
 
@@ -114,7 +114,7 @@ The Z axis homes first for safety (moves up and away from workpiece).
 ## File Structure
 
 ```
-configs/logosol-sawmill/
+config/nicky_5axis_mill/
 ├── logosol.ini          # Main INI configuration
 ├── logosol.hal          # Main HAL connections
 ├── custom.hal           # User customizations
@@ -144,7 +144,7 @@ configs/logosol-sawmill/
 Before running the full LinuxCNC GUI, test the HAL connections:
 
 ```bash
-cd configs/logosol-sawmill
+cd config/nicky_5axis_mill
 halrun -I logosol.hal
 ```
 
@@ -161,7 +161,7 @@ Expected startup sequence:
 ### Running LinuxCNC
 
 ```bash
-linuxcnc configs/logosol-sawmill/logosol.ini
+linuxcnc config/nicky_5axis_mill/logosol.ini
 ```
 
 ## E-Stop and Power Control

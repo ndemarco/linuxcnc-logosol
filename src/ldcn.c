@@ -99,10 +99,13 @@ typedef struct {
     hal_bit_t *estop_ok;        /* OUT: TRUE when system is NOT in E-stop */
     hal_u32_t *din_raw;         /* OUT: Raw digital input word from supervisor */
     hal_bit_t *homing_active;   /* OUT: TRUE when any axis is homing */
-    ldcn_drive_status_t supervisor_status;  /* Supervisor status cache */
 
     /* Runtime state */
     bool running;
+    bool power_up_needed;           /* TRUE until first F2 triggers power-up sequence */
+    bool power_up_in_progress;      /* TRUE while waiting for power button */
+    bool waiting_for_power_button;  /* TRUE while polling for power button press */
+    uint8_t power_button_baseline;  /* Baseline status before power button press */
     int comp_id;
 
 } hal_data_t;
@@ -414,19 +417,22 @@ static int wait_for_power(ldcn_serial_port_t *port) {
         int ret = ldcn_serial_exchange(port, &cmd, &status, 200);
 
         if (ret > 1 && status.data_len > 0) {
-            /* Status byte is data[0] (Python response[1], the 2nd byte) */
+            /* Status byte is data[0] - this is the diagnostic code from the manual */
             uint8_t current_status = status.data[0];
+            uint8_t diagnostic_code = current_status;
+            const char *description = ldcn_get_diagnostic_description(diagnostic_code);
 
             /* Print every 10th poll or when status changes */
             if (poll_count % 10 == 0 || current_status != last_status) {
-                rtapi_print_msg(RTAPI_MSG_INFO, "%s: [%3d] Status: 0x%02X, Power bit: %d\n",
-                              COMP_NAME, poll_count, current_status,
-                              !!(current_status & 0x08));
+                rtapi_print_msg(RTAPI_MSG_INFO, "%s: [%3d] Diagnostic: 0x%02X \"%s\"\n",
+                              COMP_NAME, poll_count, diagnostic_code, description);
             }
 
-            /* Check if power bit (bit 3) is now set */
-            if (current_status != last_status && (current_status & 0x08)) {
-                fprintf(stderr, "%s: Power button pressed - power is ON\n", COMP_NAME);
+            /* Check if status changed from baseline (power button was pressed)
+             * Baseline is typically 0x00 or 0x04 (Power OFF), button changes to 0x08+ */
+            if (current_status != last_status && diagnostic_code >= 0x08) {
+                fprintf(stderr, "%s: Power button pressed - diagnostic: 0x%02X \"%s\"\n",
+                       COMP_NAME, diagnostic_code, description);
                 fflush(stderr);
                 power_detected = 1;
                 break;
@@ -494,14 +500,14 @@ static int init_drive(int axis_num) {
     
     /* Step 3: Set PID gains */
     memset(&gains, 0, sizeof(gains));
-    /* Conservative default gains for safe operation - tune per axis later */
-    gains.kp = axis->kp ? axis->kp : 10;     /* Low proportional gain */
-    gains.kd = axis->kd ? axis->kd : 100;    /* Low derivative gain */
-    gains.ki = axis->ki ? axis->ki : 0;      /* Disable integral initially */
-    gains.il = 500;
-    gains.ol = 0x80;  /* Output limit - reduced to 50% for safety */
-    gains.cl = 0;     /* Current limit (0 = disabled) */
-    gains.el = 1024;  /* Position error limit */
+    /* Gains from HAL parameters, with defaults matching reference config */
+    gains.kp = axis->kp ? axis->kp : 10;     /* Position gain from reference */
+    gains.kd = axis->kd ? axis->kd : 1000;   /* Velocity gain from reference */
+    gains.ki = axis->ki ? axis->ki : 20;     /* Integral gain from reference */
+    gains.il = 40;                            /* Integration limit from reference */
+    gains.ol = 255;                           /* Output limit - 100% from reference */
+    gains.cl = 0;                             /* Current limit - disabled */
+    gains.el = 2000;                          /* Position error limit from reference */
     gains.sr = hal_data->servo_rate_divisor;
     gains.db = 0;
     
@@ -542,13 +548,58 @@ static int init_drive(int axis_num) {
                        COMP_NAME, axis_num);
         return -1;
     }
-    
+
+    /* Step 6: Reset position counter
+     * Sets the position counter to zero */
+    ldcn_cmd_reset_position(&cmd, axis->ldcn_addr);
+    ret = ldcn_serial_exchange(hal_data->port, &cmd, &status, 100);
+    if (ret < 0) {
+        rtapi_print_msg(RTAPI_MSG_WARN,
+                       "%s: Failed to reset position for axis %d (continuing anyway)\n",
+                       COMP_NAME, axis_num);
+    }
+
+    /* Step 7: Clear sticky status bits (including position_error flag)
+     * Per LS-231SE manual: "In the status byte, the move_done and pos_error
+     * flags will be set" after reset. Clear these sticky bits. */
+    ldcn_cmd_clear_bits(&cmd, axis->ldcn_addr);
+    ret = ldcn_serial_exchange(hal_data->port, &cmd, &status, 100);
+    if (ret < 0) {
+        rtapi_print_msg(RTAPI_MSG_WARN,
+                       "%s: Failed to clear status bits for axis %d (continuing anyway)\n",
+                       COMP_NAME, axis_num);
+    }
+
+    /* Step 8: Read status to update axis->status with cleared flags */
+    usleep(10000);  /* 10ms delay to let drive process the reset */
+    ldcn_cmd_read_status(&cmd, axis->ldcn_addr, status_bits);
+    ret = ldcn_serial_exchange(hal_data->port, &cmd, &status, 100);
+    if (ret > 0) {
+        if (ldcn_parse_status(&status, &axis->status, status_bits)) {
+            rtapi_print_msg(RTAPI_MSG_INFO,
+                           "%s: Axis %d status after reset: pos_err=%d, current_limit=%d, servo_on=%d\n",
+                           COMP_NAME, axis_num, axis->status.position_error,
+                           axis->status.current_limit, axis->status.servo_on);
+        }
+    }
+
+    /* Step 9: Send START_MOTION command to activate motion control
+     * This is required before the drive will respond to position commands */
+    ldcn_cmd_start_motion(&cmd, axis->ldcn_addr);
+    ret = ldcn_serial_exchange(hal_data->port, &cmd, &status, 100);
+    if (ret < 0) {
+        rtapi_print_msg(RTAPI_MSG_ERR,
+                       "%s: Failed to start motion for axis %d\n",
+                       COMP_NAME, axis_num);
+        return -1;
+    }
+
     axis->initialized = true;
-    
+
     rtapi_print_msg(RTAPI_MSG_INFO,
                    "%s: Axis %d initialized successfully\n",
                    COMP_NAME, axis_num);
-    
+
     return 0;
 }
 
@@ -562,15 +613,15 @@ static void update_axis(int axis_num) {
     
     if (!axis->initialized) return;
     
-    /* Handle enable/disable transitions */
+    /* Handle enable/disable transitions
+     * NOTE: Drives are already enabled during initialization with STOP_AMP_ENABLE.
+     * We don't need to send enable commands again - just start/stop sending position commands.
+     * Only send STOP_MOTOR_OFF when explicitly disabling. */
     if (*axis->enable && !axis->enabled_prev) {
-        /* Enable transition */
-        ldcn_cmd_stop_motor(&cmd, axis->ldcn_addr,
-                           LDCN_STOP_AMP_ENABLE | LDCN_STOP_ABRUPT);
-        ldcn_serial_send_command(hal_data->port, &cmd);
+        /* Enable transition - just update state, drive is already enabled from init */
         axis->enabled_prev = true;
     } else if (!*axis->enable && axis->enabled_prev) {
-        /* Disable transition */
+        /* Disable transition - turn motor off */
         ldcn_cmd_stop_motor(&cmd, axis->ldcn_addr, LDCN_STOP_MOTOR_OFF);
         ldcn_serial_send_command(hal_data->port, &cmd);
         axis->enabled_prev = false;
@@ -593,7 +644,7 @@ static void update_axis(int axis_num) {
                                                 hal_data->servo_rate_divisor);
         uint32_t accel_raw = ldcn_accel_to_raw(*axis->accel * axis->scale,
                                               hal_data->servo_rate_divisor);
-        
+
         /* Build trajectory */
         memset(&traj, 0, sizeof(traj));
         traj.position = pos_counts;
@@ -602,7 +653,16 @@ static void update_axis(int axis_num) {
         traj.servo_mode = true;
         traj.velocity_mode = false;  /* Use trapezoidal profile */
         traj.start_now = true;
-        
+
+        /* Debug: Log first few position commands for each axis */
+        static int cmd_count[32] = {0};
+        if (cmd_count[axis_num] < 5) {
+            fprintf(stderr, "ldcn: Axis %d CMD: pos=%d counts (%.4f mm), vel=%u, accel=%u\n",
+                    axis_num, pos_counts, *axis->pos_cmd, vel_raw, accel_raw);
+            fflush(stderr);
+            cmd_count[axis_num]++;
+        }
+
         ldcn_cmd_load_trajectory(&cmd, axis->ldcn_addr, &traj);
         ldcn_serial_send_command(hal_data->port, &cmd);
     }
@@ -611,9 +671,35 @@ static void update_axis(int axis_num) {
     uint16_t status_bits = LDCN_STATUS_SEND_POS | LDCN_STATUS_SEND_VEL |
                           LDCN_STATUS_SEND_AUX | LDCN_STATUS_SEND_POS_ERR;
     ldcn_cmd_read_status(&cmd, axis->ldcn_addr, status_bits);
-    
+
     ret = ldcn_serial_exchange(hal_data->port, &cmd, &status_pkt, 50);
     if (ret > 0) {
+        /* CRITICAL: Verify checksum before using data */
+        if (!ldcn_verify_checksum(&status_pkt)) {
+            static int axis_checksum_errors[32] = {0};
+            if (++axis_checksum_errors[axis_num] < 5) {
+                /* Calculate expected checksum for debugging */
+                uint8_t calc_cksum = status_pkt.status;
+                for (int i = 0; i < status_pkt.data_len; i++) {
+                    calc_cksum += status_pkt.data[i];
+                }
+                fprintf(stderr, "%s: !!! CHECKSUM ERROR !!! Axis %d status discarded (count=%d)\n",
+                        COMP_NAME, axis_num, axis_checksum_errors[axis_num]);
+                fprintf(stderr, "  status=0x%02X, data_len=%d, calc_cksum=0x%02X, recv_cksum=0x%02X, diff=%d\n",
+                        status_pkt.status, status_pkt.data_len, calc_cksum, status_pkt.checksum,
+                        (int)status_pkt.checksum - (int)calc_cksum);
+                /* Dump first few data bytes */
+                fprintf(stderr, "  data: ");
+                for (int i = 0; i < (status_pkt.data_len < 8 ? status_pkt.data_len : 8); i++) {
+                    fprintf(stderr, "%02X ", status_pkt.data[i]);
+                }
+                fprintf(stderr, "\n");
+                fflush(stderr);
+            }
+            *axis->fault = true;  /* Set fault on checksum error */
+            return;
+        }
+
         /* Parse status */
         if (ldcn_parse_status(&status_pkt, &axis->status, status_bits)) {
             /* Update HAL pins with feedback */
@@ -623,6 +709,18 @@ static void update_axis(int axis_num) {
             *axis->ferror = (hal_float_t)axis->status.following_error / axis->scale;
             *axis->amp_enabled = axis->status.servo_on;
             *axis->fault = axis->status.position_error || axis->status.current_limit;
+
+            /* Debug: Log first few status reads for each axis */
+            static int status_count[32] = {0};
+            if (status_count[axis_num] < 5 || *axis->fault) {
+                fprintf(stderr, "ldcn: Axis %d STATUS: pos=%d (%.4f mm), vel=%d, ferror=%d, servo_on=%d, fault=%d (pos_err=%d, cur_lim=%d)\n",
+                        axis_num, axis->status.position, *axis->pos_fb,
+                        axis->status.velocity, axis->status.following_error,
+                        axis->status.servo_on, *axis->fault,
+                        axis->status.position_error, axis->status.current_limit);
+                fflush(stderr);
+                if (!*axis->fault) status_count[axis_num]++;
+            }
         }
     }
 }
@@ -633,36 +731,94 @@ static void update_supervisor(void) {
     ldcn_status_packet_t status_pkt;
     int ret;
 
-    /* Request digital inputs from supervisor */
-    uint16_t status_bits = LDCN_STATUS_SEND_DIG_IN;
-    ldcn_cmd_read_status(&cmd, SUPERVISOR_ADDR, status_bits);
-
+    /* Use NOP command to read supervisor status, same as wait_for_power() */
+    ldcn_build_command(&cmd, SUPERVISOR_ADDR, LDCN_CMD_NOP, NULL, 0);
     ret = ldcn_serial_exchange(hal_data->port, &cmd, &status_pkt, 50);
-    if (ret > 0) {
-        /* Parse supervisor status */
-        if (ldcn_parse_status(&status_pkt, &hal_data->supervisor_status, status_bits)) {
-            /* Update raw digital input pin */
-            *hal_data->din_raw = hal_data->supervisor_status.digital_inputs;
 
-            /* E-stop state comes from the status byte, not digital inputs
-             * When E-stop is active, power_on flag will be false
-             * estop_ok should be TRUE when E-stop is NOT active (power_on = true) */
-            bool prev_estop_ok = *hal_data->estop_ok;
-            *hal_data->estop_ok = hal_data->supervisor_status.power_on;
-
-            /* Print message when E-stop state changes
-             * Only show "E-STOP PRESSED" when transitioning from power ON to power OFF
-             * (not during initial startup when power was never on) */
-            if (prev_estop_ok && !hal_data->supervisor_status.power_on) {
-                fprintf(stderr, "%s: !!! E-STOP PRESSED !!! (power lost)\n", COMP_NAME);
+    if (ret > 1 && status_pkt.data_len > 0) {
+        /* CRITICAL: Verify checksum before using data */
+        if (!ldcn_verify_checksum(&status_pkt)) {
+            static int checksum_error_count = 0;
+            if (++checksum_error_count < 10) {
+                fprintf(stderr, "%s: !!! CHECKSUM ERROR !!! Supervisor status discarded (count=%d)\n",
+                        COMP_NAME, checksum_error_count);
+                fprintf(stderr, "  status=0x%02X, data[0]=0x%02X, calc_cksum=0x%02X, recv_cksum=0x%02X\n",
+                        status_pkt.status, status_pkt.data[0],
+                        (uint8_t)(status_pkt.status + status_pkt.data[0]), status_pkt.checksum);
                 fflush(stderr);
-            } else if (!prev_estop_ok && hal_data->supervisor_status.power_on) {
-                fprintf(stderr, "%s: Power enabled (E-stop clear)\n", COMP_NAME);
+            }
+            return;  /* Discard corrupted data */
+        }
+
+        /* Supervisor status byte is in data[0], NOT in status field!
+         * The status byte IS the diagnostic code from the manual - use it as-is.
+         * LED diagnostic display shows the same code. */
+        uint8_t diagnostic_code = status_pkt.data[0];
+        const char *description = ldcn_get_diagnostic_description(diagnostic_code);
+
+        /* Debug: Log diagnostic code changes */
+        static uint8_t last_code = 0xFF;
+        if (diagnostic_code != last_code) {
+            fprintf(stderr, "%s: Supervisor diagnostic: 0x%02X \"%s\"\n",
+                    COMP_NAME, diagnostic_code, description);
+            fflush(stderr);
+            last_code = diagnostic_code;
+        }
+
+        /* Digital inputs would be in data bytes if we requested them, but with NOP we don't get them
+         * Set to 0 since we're not reading them */
+        *hal_data->din_raw = 0;
+
+        /* E-stop state logic:
+         * BEFORE power-up: Always report estop_ok = TRUE (allow F1/F2 to work)
+         * AFTER power-up: Check if motors are powered and system is in good state */
+        bool prev_estop_ok = *hal_data->estop_ok;
+        if (hal_data->power_up_needed) {
+            /* Before power button pressed - allow E-STOP to be cleared */
+            *hal_data->estop_ok = true;
+        } else {
+            /* After power-up - monitor supervisor diagnostic code
+             * System is OK if we're in operational states (not faulted):
+             * - 0x0C: Cover open, not homed (allows manual jogging)
+             * - 0x12-0x14: Ready/Limit/E-Stop states
+             * - 0x18-0x1F: Ready and Test mode states
+             * - 0x22: POWERED (motors enabled) */
+            *hal_data->estop_ok = (diagnostic_code == 0x0C ||  /* Cover open, not homed */
+                                   (diagnostic_code >= 0x12 && diagnostic_code <= 0x14) ||  /* Limit/E-Stop */
+                                   (diagnostic_code >= 0x18 && diagnostic_code <= 0x22));   /* Ready/Test/Powered */
+        }
+
+        /* Debug: Print supervisor status on every change or periodically */
+        static int debug_counter = 0;
+        static uint8_t last_diagnostic_code = 0xFF;
+        if (++debug_counter % 1000 == 0 || diagnostic_code != last_diagnostic_code) {
+            if (hal_data->power_up_needed) {
+                fprintf(stderr, "%s: Supervisor [%d]: Waiting for F2 press (estop_ok=TRUE, allowing F1/F2)\n",
+                        COMP_NAME, debug_counter);
+            } else {
+                fprintf(stderr, "%s: Supervisor [%d]: 0x%02X \"%s\" (estop_ok=%d)\n",
+                        COMP_NAME, debug_counter, diagnostic_code,
+                        description, *hal_data->estop_ok);
+            }
+            fflush(stderr);
+            last_diagnostic_code = diagnostic_code;
+        }
+
+        /* E-stop monitoring only active AFTER power-up sequence completes */
+        if (!hal_data->power_up_needed) {
+            /* Print message when supervisor state changes to fault/stop conditions */
+            if (prev_estop_ok && !*hal_data->estop_ok) {
+                fprintf(stderr, "%s: !!! FAULT DETECTED !!! Supervisor: 0x%02X \"%s\"\n",
+                        COMP_NAME, diagnostic_code, description);
+                fflush(stderr);
+            } else if (!prev_estop_ok && *hal_data->estop_ok) {
+                fprintf(stderr, "%s: System OK - Supervisor: 0x%02X \"%s\"\n",
+                        COMP_NAME, diagnostic_code, description);
                 fflush(stderr);
             }
 
-            /* If E-stop is pressed (power_on = false), disable all axes */
-            if (!hal_data->supervisor_status.power_on) {
+            /* If supervisor reports fault/stop condition, disable all axes */
+            if (!*hal_data->estop_ok) {
                 for (int i = 0; i < hal_data->num_axes; i++) {
                     axis_data_t *axis = &hal_data->axes[i];
                     if (axis->initialized && *axis->enable) {
@@ -674,6 +830,18 @@ static void update_supervisor(void) {
                     }
                 }
             }
+        }
+    } else {
+        /* Communication failed - fall through to error handling below */
+    }
+
+    /* Handle communication errors */
+    if (ret <= 0) {
+        static int comm_fail_counter = 0;
+        if (++comm_fail_counter < 5) {
+            fprintf(stderr, "%s: ERROR: Failed to read supervisor status (ret=%d)\n",
+                    COMP_NAME, ret);
+            fflush(stderr);
         }
     }
 
@@ -691,10 +859,131 @@ static void update_supervisor(void) {
 
 /* Main update loop */
 static void update_all(void) {
+    ldcn_cmd_packet_t cmd;
+    ldcn_status_packet_t status_pkt;
+
+    /* Check if power-up sequence needs to be triggered */
+    if (hal_data->power_up_needed && !hal_data->power_up_in_progress) {
+        /* Check if ANY axis enable pin is TRUE (F2 pressed) */
+        bool enable_requested = false;
+        for (int i = 0; i < hal_data->num_axes; i++) {
+            if (*hal_data->axes[i].enable) {
+                enable_requested = true;
+                break;
+            }
+        }
+
+        if (enable_requested) {
+            fprintf(stderr, "\n%s: ======================================================================\n", COMP_NAME);
+            fprintf(stderr, "%s: F2 DETECTED - Starting power-up sequence\n", COMP_NAME);
+            fprintf(stderr, "%s: *** PRESS POWER BUTTON NOW ***\n", COMP_NAME);
+            fprintf(stderr, "%s: ======================================================================\n\n", COMP_NAME);
+            fflush(stderr);
+
+            hal_data->power_up_in_progress = true;
+            hal_data->waiting_for_power_button = true;
+
+            /* Read baseline status */
+            ldcn_build_command(&cmd, SUPERVISOR_ADDR, LDCN_CMD_NOP, NULL, 0);
+            int ret = ldcn_serial_exchange(hal_data->port, &cmd, &status_pkt, 200);
+            if (ret > 1 && status_pkt.data_len > 0) {
+                hal_data->power_button_baseline = status_pkt.data[0];
+                fprintf(stderr, "%s: Baseline status: 0x%02X\n", COMP_NAME, hal_data->power_button_baseline);
+                fflush(stderr);
+            } else {
+                hal_data->power_button_baseline = 0x00;
+            }
+        }
+    }
+
+    /* If waiting for power button, poll for it (non-blocking) */
+    if (hal_data->waiting_for_power_button) {
+        ldcn_build_command(&cmd, SUPERVISOR_ADDR, LDCN_CMD_NOP, NULL, 0);
+        int ret = ldcn_serial_exchange(hal_data->port, &cmd, &status_pkt, 200);
+
+        if (ret > 1 && status_pkt.data_len > 0) {
+            uint8_t current_status = status_pkt.data[0];
+            uint8_t diagnostic_code = current_status;
+            const char *description = ldcn_get_diagnostic_description(diagnostic_code);
+
+            /* Check if status changed from baseline (power button was pressed)
+             * Baseline is typically 0x00 or 0x04 (Power OFF/Initializing)
+             * Button press changes to operational state (0x0C+)
+             * We initialize drives as soon as status changes from baseline */
+            if (diagnostic_code != hal_data->power_button_baseline && diagnostic_code >= 0x08) {
+                fprintf(stderr, "%s: Power button pressed - diagnostic: 0x%02X \"%s\"\n",
+                       COMP_NAME, diagnostic_code, description);
+                fflush(stderr);
+
+                hal_data->waiting_for_power_button = false;
+
+                /* Initialize all servo drives */
+                fprintf(stderr, "%s: Initializing %d servo drive(s)...\n", COMP_NAME, hal_data->num_axes);
+                fflush(stderr);
+                for (int i = 0; i < hal_data->num_axes; i++) {
+                    if (init_drive(i) < 0) {
+                        fprintf(stderr, "%s: ERROR: Failed to initialize axis %d\n", COMP_NAME, i);
+                        fflush(stderr);
+                        hal_data->power_up_in_progress = false;
+                        /* Keep power_up_needed = true to allow retry */
+                        return;
+                    }
+                    fprintf(stderr, "%s: Axis %d initialized\n", COMP_NAME, i);
+                    fflush(stderr);
+
+                    /* Poll supervisor after each axis to:
+                     * 1. Keep communication alive (prevent timeout)
+                     * 2. Monitor for current/power issues during init */
+                    update_supervisor();
+
+                    /* Small delay between axes to reduce current surge */
+                    usleep(50000);  /* 50ms */
+                }
+
+                /* Clear any sticky fault bits from initialization on all drives */
+                fprintf(stderr, "%s: Clearing fault flags on all drives...\n", COMP_NAME);
+                fflush(stderr);
+                for (int i = 0; i < hal_data->num_axes; i++) {
+                    axis_data_t *axis = &hal_data->axes[i];
+                    if (axis->initialized) {
+                        ldcn_cmd_packet_t clear_cmd;
+                        ldcn_status_packet_t clear_status;
+                        ldcn_cmd_clear_bits(&clear_cmd, axis->ldcn_addr);
+                        ldcn_serial_exchange(hal_data->port, &clear_cmd, &clear_status, 100);
+                    }
+                }
+
+                /* Sync position feedback to LinuxCNC - prevents following errors
+                 * LinuxCNC's commands may have drifted during the blocking init.
+                 * Match feedback to command to absorb the drift. */
+                for (int i = 0; i < hal_data->num_axes; i++) {
+                    axis_data_t *axis = &hal_data->axes[i];
+                    if (axis->initialized) {
+                        /* Sync feedback to whatever LinuxCNC is commanding */
+                        *axis->pos_fb = *axis->pos_cmd;
+                        *axis->vel_fb = 0.0;
+                    }
+                }
+
+                /* Power-up complete */
+                hal_data->power_up_needed = false;
+                hal_data->power_up_in_progress = false;
+
+                fprintf(stderr, "%s: All servo drives initialized and ready\n", COMP_NAME);
+                fprintf(stderr, "%s: ======================================================================\n\n", COMP_NAME);
+                fflush(stderr);
+            }
+        }
+
+        /* Continue to update supervisor and axes even while waiting */
+    }
+
     /* Update supervisor and E-stop status */
     update_supervisor();
 
-    /* Update all axes */
+    /* Update all axes
+     * Note: update_axis() checks axis->initialized internally,
+     * so it's safe to call even during power-up sequence */
     for (int i = 0; i < hal_data->num_axes; i++) {
         update_axis(i);
     }
@@ -766,12 +1055,12 @@ static int export_axis(int num) {
     ret = hal_param_u32_newf(HAL_RW, &axis->kd, hal_data->comp_id,
                             "%s.%d.kd", COMP_NAME, num);
     if (ret != 0) return ret;
-    axis->kd = 100;   /* Conservative default - tune per axis to avoid oscillation */
+    axis->kd = 1000;  /* Velocity gain from reference */
 
     ret = hal_param_u32_newf(HAL_RW, &axis->ki, hal_data->comp_id,
                             "%s.%d.ki", COMP_NAME, num);
     if (ret != 0) return ret;
-    axis->ki = 0;     /* Disabled by default - enable after tuning kp/kd */
+    axis->ki = 20;    /* Integral gain from reference */
 
     ret = hal_param_u32_newf(HAL_RO, &axis->address, hal_data->comp_id,
                             "%s.%d.address", COMP_NAME, num);
@@ -912,8 +1201,9 @@ int main(int argc, char **argv) {
         !hal_data->do_upgrade_baud && !hal_data->do_configure_supervisor &&
         !hal_data->do_wait_power && !hal_data->do_init_servos) {
         hal_data->do_full_init = true;
-        /* Full init requires power-wait for hardware to be ready */
-        hal_data->do_wait_power = true;
+        /* NOTE: Power-wait and servo init are deferred until F2 is pressed.
+         * This allows LinuxCNC GUI to start first, then operator presses F2
+         * to trigger power button wait sequence. */
     }
 
     /* Initialize HAL */
@@ -1143,8 +1433,10 @@ int main(int argc, char **argv) {
         }
     }
 
-    /* Phase 8: Initialize servo drives */
-    if (hal_data->do_init_servos || hal_data->do_full_init) {
+    /* Phase 8: Initialize servo drives
+     * Only do this during startup if explicitly requested (do_init_servos).
+     * For full_init mode, servo initialization is deferred until F2 is pressed. */
+    if (hal_data->do_init_servos) {
         rtapi_print_msg(RTAPI_MSG_INFO, "%s: Initializing %d servo drives...\n",
                        COMP_NAME, hal_data->num_axes);
         fprintf(stderr, "%s: Initializing %d servo drive(s)...\n", COMP_NAME, hal_data->num_axes);
@@ -1168,7 +1460,24 @@ int main(int argc, char **argv) {
     /* Setup signal handlers */
     signal(SIGINT, quit);
     signal(SIGTERM, quit);
-    
+
+    /* Determine if power-up sequence is needed */
+    if (hal_data->do_wait_power || hal_data->do_init_servos) {
+        /* Explicit power-wait or servo-init requested - already done above */
+        hal_data->power_up_needed = false;
+    } else if (hal_data->do_full_init) {
+        /* Full init mode - defer power-up until F2 pressed */
+        hal_data->power_up_needed = true;
+        fprintf(stderr, "%s: *** Power-up deferred until F2 is pressed ***\n", COMP_NAME);
+        fflush(stderr);
+    } else {
+        /* Partial init mode - no power-up needed */
+        hal_data->power_up_needed = false;
+    }
+    hal_data->power_up_in_progress = false;
+    hal_data->waiting_for_power_button = false;
+    hal_data->power_button_baseline = 0x00;
+
     /* Main loop - run at ~1ms (1000 Hz) */
     hal_data->running = true;
     rtapi_print_msg(RTAPI_MSG_INFO, "%s: Entering main loop\n", COMP_NAME);

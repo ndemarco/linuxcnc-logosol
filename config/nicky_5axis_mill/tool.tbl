@@ -1,4 +1,4 @@
-; Tool table for Logosol Sawmill
+; Tool table for Nicky 5-Axis Mill
 ; Format: Pocket Tool Diameter Offset Comment
 ; Example: T1 P1 D25.4 Z0.0 ;1/4 inch cutter
 

@@ -13,10 +13,12 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <stddef.h>
 
 /* Protocol Constants */
 #define LDCN_HEADER 0xAA
 #define LDCN_MAX_DEVICES 6
+#define LDCN_MAX_AXES 31           /* Maximum axes in LDCN network */
 #define LDCN_MAX_DATA_BYTES 16
 #define LDCN_MAX_RESPONSE 50
 
@@ -43,8 +45,11 @@
 #define LDCN_CMD_HARD_RESET     0xF
 
 /* Special Addresses */
-#define LDCN_ADDR_UNADDRESSED 0x00
-#define LDCN_ADDR_GROUP_ALL   0xFF
+#define LDCN_ADDR_UNADDRESSED    0x00
+#define LDCN_ADDR_DEFAULT        0x00  /* Alias for unaddressed */
+#define LDCN_ADDR_GROUP_ALL      0xFF
+#define LDCN_ADDR_BROADCAST      0xFF  /* Alias for group all */
+#define LDCN_DEFAULT_GROUP_ADDR  0xFF  /* Default group address */
 
 /* Baud Rate Divisors (BRD) */
 #define LDCN_BRD_9600    0x81
@@ -55,6 +60,18 @@
 #define LDCN_BRD_312500  0x0F
 #define LDCN_BRD_625000  0x07
 #define LDCN_BRD_1250000 0x03
+
+/* Baud Rate Values (enum for compatibility) */
+typedef enum {
+    LDCN_BAUD_9600    = 0x81,
+    LDCN_BAUD_19200   = 0x3F,
+    LDCN_BAUD_57600   = 0x14,
+    LDCN_BAUD_115200  = 0x0A,
+    LDCN_BAUD_125000  = 0x27,
+    LDCN_BAUD_312500  = 0x0F,
+    LDCN_BAUD_625000  = 0x07,
+    LDCN_BAUD_1250000 = 0x03
+} ldcn_baud_rate_t;
 
 /* Status Byte Bits (Servo Drives) */
 #define LDCN_STATUS_MOVE_DONE     (1 << 0)
@@ -77,21 +94,35 @@
 
 /* Stop Motor Command Bits */
 #define LDCN_STOP_ABRUPTLY      (1 << 0)
+#define LDCN_STOP_ABRUPT        (1 << 0)  /* Alias */
 #define LDCN_STOP_SMOOTHLY      (1 << 1)
+#define LDCN_STOP_SMOOTH        (1 << 1)  /* Alias */
 #define LDCN_STOP_MOTOR_OFF     (1 << 2)
 #define LDCN_STOP_AMP_ENABLE    (1 << 4)
 
+/* I/O Control Command Bits */
+#define LDCN_IO_BRAKE_MODE          (1 << 0)
+#define LDCN_IO_BRAKE_OUT           (1 << 1)
+#define LDCN_IO_SET_PATH_FREQ       (1 << 6)
+
 /* Define Status Bits */
 #define LDCN_STATUS_SEND_POSITION    (1 << 0)
+#define LDCN_STATUS_SEND_POS         (1 << 0)   /* Alias */
 #define LDCN_STATUS_SEND_AD          (1 << 1)
 #define LDCN_STATUS_SEND_VELOCITY    (1 << 2)
+#define LDCN_STATUS_SEND_VEL         (1 << 2)   /* Alias */
 #define LDCN_STATUS_SEND_AUX         (1 << 3)
 #define LDCN_STATUS_SEND_HOME        (1 << 4)
 #define LDCN_STATUS_SEND_DEVICE_ID   (1 << 5)
+#define LDCN_STATUS_SEND_ID_VER      (1 << 5)   /* Alias */
 #define LDCN_STATUS_SEND_POS_ERROR   (1 << 6)
+#define LDCN_STATUS_SEND_POS_ERR     (1 << 6)   /* Alias */
 #define LDCN_STATUS_SEND_PATH_BUFFER (1 << 7)
+#define LDCN_STATUS_SEND_BUFFER_CNT  (1 << 7)   /* Alias */
 #define LDCN_STATUS_SEND_DIGITAL_IN  (1 << 8)
+#define LDCN_STATUS_SEND_DIG_IN      (1 << 8)   /* Alias */
 #define LDCN_STATUS_SEND_ANALOG_IN   (1 << 9)
+#define LDCN_STATUS_SEND_ANA_IN      (1 << 9)   /* Alias */
 #define LDCN_STATUS_SEND_WATCHDOG    (1 << 12)
 #define LDCN_STATUS_SEND_MOTOR_POS   (1 << 13)
 
@@ -138,6 +169,16 @@ typedef struct {
 /* Maximum status data bytes */
 #define LDCN_MAX_STATUS_BYTES 32
 
+/* Command Packet Structure (sent to device) */
+typedef struct {
+    uint8_t header;                          /* Always 0xAA */
+    uint8_t address;                         /* Individual or group */
+    uint8_t command;                         /* Upper nibble=data bytes, lower=cmd */
+    uint8_t data[LDCN_MAX_DATA_BYTES];      /* Command-specific data */
+    uint8_t data_len;                        /* Actual data length */
+    uint8_t checksum;                        /* Sum of addr+cmd+data */
+} __attribute__((packed)) ldcn_cmd_packet_t;
+
 /* Status Packet Structure (received from device) */
 typedef struct {
     uint8_t status;                          /* Status byte */
@@ -174,6 +215,60 @@ typedef struct {
     uint8_t device_id;
     uint8_t version;
 } ldcn_drive_status_t;
+
+/* SK-2310g2 Supervisor Diagnostic Codes
+ * These are the exact diagnostic codes from the SK-2310g2 manual, page 19.
+ * The diagnostic byte is used AS-IS - no masking or shifting.
+ * LED diagnostic display shows the actual diagnostic code.
+ */
+#define LDCN_SUPERVISOR_POWER_OFF_DELAY       0x00  /* Power OFF delay / Initializing */
+#define LDCN_SUPERVISOR_INITIALIZING          0x04  /* Initializing */
+#define LDCN_SUPERVISOR_CONTROL_VOLTAGE_SHORT 0x08  /* Control voltage shorted */
+#define LDCN_SUPERVISOR_OUTPUT_SHORTED        0x09  /* Output shorted */
+#define LDCN_SUPERVISOR_CONTROL_VOLTAGE_LOW   0x0A  /* Control voltage LOW (<18V) */
+#define LDCN_SUPERVISOR_HOME_SWITCH_FAULT     0x0B  /* Home switch malfunction */
+#define LDCN_SUPERVISOR_COVER_OPEN_NOT_HOMED  0x0C  /* Cover open, not homed (manual mode OK) */
+#define LDCN_SUPERVISOR_COVER_OPEN_NOT_HOME   0x0D  /* Cover Open Stop (not at home) */
+#define LDCN_SUPERVISOR_COVER_CONTACT_FAULT   0x0E  /* Cover contact fault (malfunction) */
+#define LDCN_SUPERVISOR_COVER_OPEN_TEST_MODE  0x0F  /* Cover Open Stop (test mode) */
+#define LDCN_SUPERVISOR_LIMIT_SWITCH_STOP     0x12  /* Limit Switch Stop */
+#define LDCN_SUPERVISOR_EMERGENCY_STOP        0x13  /* Emergency Stop */
+#define LDCN_SUPERVISOR_ESTOP_CONTACT_FAULT   0x14  /* E-stop contact malfunction */
+#define LDCN_SUPERVISOR_COVERS_00_READY       0x18  /* Ready (covers open) */
+#define LDCN_SUPERVISOR_COVERS_11_READY       0x1B  /* Ready (covers closed) */
+#define LDCN_SUPERVISOR_COVERS_00_TEST        0x1C  /* Test Mode (covers open) */
+#define LDCN_SUPERVISOR_COVERS_11_TEST        0x1F  /* Test Mode (covers closed) */
+#define LDCN_SUPERVISOR_COVERS_11_POWERED     0x22  /* POWERED (motors enabled) */
+
+/* Helper function: Get diagnostic code from raw status byte (no transformation) */
+static inline uint8_t ldcn_get_diagnostic_code(uint8_t raw_status) {
+    return raw_status;  /* Use diagnostic code exactly as-is from manual */
+}
+
+/* Helper function: Get human-readable diagnostic description */
+static inline const char* ldcn_get_diagnostic_description(uint8_t diagnostic_code) {
+    switch (diagnostic_code) {
+        case 0x00: return "Power OFF delay / Initializing";
+        case 0x04: return "Initializing";
+        case 0x08: return "Control voltage shorted";
+        case 0x09: return "Output shorted";
+        case 0x0A: return "Control voltage LOW (<18V)";
+        case 0x0B: return "Home switch malfunction";
+        case 0x0C: return "Cover open, not homed (manual OK)";
+        case 0x0D: return "Cover Open Stop (not at home)";
+        case 0x0E: return "Cover contact fault";
+        case 0x0F: return "Cover Open Stop (test mode)";
+        case 0x12: return "Limit Switch Stop";
+        case 0x13: return "Emergency Stop";
+        case 0x14: return "E-stop contact malfunction";
+        case 0x18: return "Ready (covers open)";
+        case 0x1B: return "Ready (covers closed)";
+        case 0x1C: return "Test Mode (covers open)";
+        case 0x1F: return "Test Mode (covers closed)";
+        case 0x22: return "POWERED (motors enabled)";
+        default:   return "Unknown diagnostic";
+    }
+}
 
 /* PID Gain Parameters */
 typedef struct {
@@ -371,5 +466,65 @@ int ldcn_check_faults(ldcn_network_t *net, uint8_t address, uint8_t *faults);
  */
 bool ldcn_parse_status(const ldcn_status_packet_t *pkt, ldcn_drive_status_t *status,
                        uint16_t expected_fields);
+
+/*
+ * Command-Building API (compatible with ldcn.c)
+ * These functions construct command packets for direct serial transmission
+ */
+
+/**
+ * ldcn_build_command - Build a command packet
+ * @pkt: Command packet to populate
+ * @addr: Device address
+ * @cmd: Command code (0-15)
+ * @data: Data bytes (can be NULL)
+ * @data_len: Length of data (0-15)
+ */
+void ldcn_build_command(ldcn_cmd_packet_t *pkt, uint8_t addr, uint8_t cmd,
+                        const uint8_t *data, uint8_t data_len);
+
+/**
+ * ldcn_calc_checksum - Calculate checksum for command or status packet
+ * @data: Data bytes to checksum (address byte onwards, excluding header)
+ * @len: Length of data
+ *
+ * Returns: Checksum byte (sum of all bytes)
+ */
+uint8_t ldcn_calc_checksum(const uint8_t *data, size_t len);
+
+/**
+ * ldcn_verify_checksum - Verify status packet checksum
+ * @pkt: Status packet to verify
+ *
+ * Returns: true if checksum is valid, false otherwise
+ */
+bool ldcn_verify_checksum(const ldcn_status_packet_t *pkt);
+
+/* Command Builders */
+void ldcn_cmd_hard_reset(ldcn_cmd_packet_t *pkt, uint8_t addr);
+void ldcn_cmd_set_address(ldcn_cmd_packet_t *pkt, uint8_t old_addr,
+                          uint8_t new_addr, uint8_t group_addr, bool group_leader);
+void ldcn_cmd_define_status(ldcn_cmd_packet_t *pkt, uint8_t addr, uint16_t status_bits);
+void ldcn_cmd_read_status(ldcn_cmd_packet_t *pkt, uint8_t addr, uint16_t status_bits);
+void ldcn_cmd_reset_position(ldcn_cmd_packet_t *pkt, uint8_t addr);
+void ldcn_cmd_load_trajectory(ldcn_cmd_packet_t *pkt, uint8_t addr,
+                              const ldcn_trajectory_t *traj);
+void ldcn_cmd_start_motion(ldcn_cmd_packet_t *pkt, uint8_t addr);
+void ldcn_cmd_set_gain(ldcn_cmd_packet_t *pkt, uint8_t addr,
+                       const ldcn_gain_params_t *gains);
+void ldcn_cmd_stop_motor(ldcn_cmd_packet_t *pkt, uint8_t addr, uint8_t stop_mode);
+void ldcn_cmd_set_baud(ldcn_cmd_packet_t *pkt, uint8_t baud_rate_divisor);
+void ldcn_cmd_clear_bits(ldcn_cmd_packet_t *pkt, uint8_t addr);
+void ldcn_cmd_io_control(ldcn_cmd_packet_t *pkt, uint8_t addr,
+                        uint8_t control_byte, uint16_t path_buffer_freq);
+
+/* Utility Functions for Velocity/Acceleration Conversion */
+const char *ldcn_cmd_name(uint8_t cmd);
+const char *ldcn_status_string(const ldcn_drive_status_t *status);
+uint32_t ldcn_velocity_to_raw(double counts_per_sec, uint8_t servo_rate_divisor);
+uint32_t ldcn_accel_to_raw(double counts_per_sec2, uint8_t servo_rate_divisor);
+double ldcn_raw_to_velocity(uint32_t raw_vel, uint8_t servo_rate_divisor);
+double ldcn_raw_to_accel(uint32_t raw_accel, uint8_t servo_rate_divisor);
+int ldcn_get_status_data_length(uint16_t status_bits);
 
 #endif /* LDCN_PROTOCOL_H */
