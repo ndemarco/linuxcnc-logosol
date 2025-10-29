@@ -22,16 +22,20 @@ Planning and design documents for the LDCN Python module refactoring project.
 
 **Contents:**
 - `LDCN_MODULE_PLAN.md` - Overall project plan with phases and milestones
-- `PYTHON_FILE_INVENTORY.md` - Inventory of existing Python utilities
+- `PYTHON_FILE_INVENTORY.md` - Inventory of existing Python utilities (6 files)
 - `FUNCTION_CATEGORIZATION.md` - Function mapping and verification status
+- `CLASS_DESIGN.md` - Complete class interface design with type hints
 
 **Purpose:** Track the development of a reusable, object-oriented Python module for LDCN network communication.
+
+**Status:** Phase 2 (Design) complete, ready for Phase 3 (Implementation)
 
 ### Root Documentation Files
 Project-specific documentation for LinuxCNC integration.
 
 **Contents:**
-- `PROTOCOL.md` - LDCN protocol implementation notes
+- `LDCN_PROTOCOL.md` - Generic LDCN network protocol (all devices)
+- `SERVO_COMMANDS.md` - LS-231SE servo drive specific commands
 - `SAFETY.md` - Safety considerations for CNC operation
 - `TROUBLESHOOTING.md` - Common issues and solutions
 - `estop-and-power-control.md` - E-stop and power button implementation
