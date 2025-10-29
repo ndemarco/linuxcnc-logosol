@@ -62,19 +62,22 @@ SK2310g2 (supervisor subclass)
 5. `test_position_command.py` - Position command testing
 
 ### Task 1.3: Extract functions from test files
-**Status:** Pending
-**Method:** Read test_servo_init.py and test_position_command.py, extract all functions
-**Output:** Add to function inventory
+**Status:** ✅ COMPLETED
+**Output:** Updated PYTHON_FILE_INVENTORY.md with:
+- `test_servo_init.py` - 5 functions extracted, 7-step servo init sequence documented
+- `test_position_command.py` - 3 functions extracted, trajectory command format documented
+- PID gain values documented
+- Servo status parsing documented
 
 ### Task 1.4: Categorize functions
-**Status:** Pending
-**Categories:**
-- **Protocol-level:** Serial communication, checksums, packet building
-- **Servo-specific:** Position control, gain setting, status reading
-- **Supervisor-specific:** Diagnostic reading, I/O control
-- **Utility:** Helpers, formatters, converters
-
-**Output:** Categorized function map
+**Status:** ✅ COMPLETED
+**Output:** Created `FUNCTION_CATEGORIZATION.md` with:
+- **Category 1:** Protocol-Level Functions → LDCNNetwork (11 functions)
+- **Category 2:** Servo-Specific Functions → LS231SE (9 functions)
+- **Category 3:** Supervisor-Specific Functions → SK2310g2 (5 functions)
+- **Category 4:** Utility Functions (6 functions)
+- Complete function mapping table (25+ methods mapped)
+- Protocol constants extracted and organized
 
 ---
 
@@ -255,8 +258,8 @@ net.close()
 
 ## Progress Tracking
 
-**Phase 1:** 🟡 In Progress (Task 1.1 ✅, Task 1.2 ✅, Task 1.3 pending)
-**Phase 2:** Not started
+**Phase 1:** ✅ COMPLETED (All tasks done!)
+**Phase 2:** 🟡 In Progress (Task 2.1 in progress)
 **Phase 3:** Not started
 **Phase 4:** Not started
 
@@ -265,6 +268,14 @@ net.close()
 ---
 
 ## Change Log
+
+### 2025-10-29 08:30
+- ✅ Extracted all functions from test_servo_init.py (5 functions)
+- ✅ Extracted all functions from test_position_command.py (3 functions)
+- ✅ Created FUNCTION_CATEGORIZATION.md
+- ✅ Categorized 25+ functions into 4 categories
+- ✅ Mapped all functions to target class methods
+- ✅ **Phase 1 Survey Complete!**
 
 ### 2025-10-29 08:25
 - ✅ Merged utilities/ into utils/ directory

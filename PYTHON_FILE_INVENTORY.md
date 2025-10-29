@@ -122,12 +122,45 @@ device_names = {
 **Purpose:** Servo Initialization Testing (matches Python script used during debugging)
 
 **Key Features:**
-- Tests servo drive initialization
-- Verifies communication
-- Tests position reading
-- Matches exact termios settings from C code
+- Complete servo drive initialization sequence
+- Mimics C code init_drive() behavior
+- Power button detection
+- Full network reset and addressing
+- Baud rate auto-detection and upgrade
+- Supervisor configuration and monitoring
 
-**Functions:** (To be extracted)
+**Functions:**
+- `send_command(ser, address, command, data_bytes=[])` - Send LDCN command
+- `parse_servo_status(response, status_bits)` - Parse servo status response with multi-byte data
+- `initialize_servo(ser, addr)` - Complete servo initialization (7 steps)
+  - Step 1: Define status reporting
+  - Step 2: Set PID gains (kp=2, kd=50, ki=0, il=40, ol=255, el=2000, sr=20)
+  - Step 3: Load initial trajectory
+  - Step 4: Enable servo (STOP_AMP_ENABLE | STOP_ABRUPT)
+  - Step 5: Reset position counter
+  - Step 6: Clear sticky status bits
+  - Step 7: Read and verify status
+- `try_communicate_at_baud(port, baud)` - Test communication at specific baud
+- `find_current_baud(port)` - Auto-detect current network baud rate
+- `main()` - Complete test sequence with power button detection
+
+**Servo Status Parsing:**
+- Handles variable-length responses based on status_bits
+- Parses: position (4B), ad_value (1B), velocity (2B), aux (1B), following_error (2B)
+- Extracts all status flags from status byte
+
+**PID Gains Used:**
+```python
+kp = 2       # Position gain
+kd = 50      # Velocity gain
+ki = 0       # Integral gain
+il = 40      # Integration limit
+ol = 255     # Output limit
+cl = 0       # Current limit
+el = 2000    # Position error limit
+sr = 20      # Servo rate divisor
+db = 0       # Deadband
+```
 
 ---
 
@@ -136,10 +169,26 @@ device_names = {
 
 **Key Features:**
 - Tests sending position commands to servos
-- Verifies motion control
-- Tests trajectory commands
+- Monitors position during motion
+- Calculates motion error
+- Uses trajectory mode with start_now flag
 
-**Functions:** (To be extracted)
+**Functions:**
+- `send_command(ser, address, command, data_bytes=[])` - Send LDCN command
+- `read_drive_position(ser, addr)` - Read current position and status
+- `send_position_command(ser, addr, position_counts)` - Send position trajectory command
+- `main()` - Test sequence: read initial position, move 1mm, monitor motion
+
+**Trajectory Command Format:**
+```python
+traj_ctrl = 0x80 | 0x10  # start_now=1, servo_mode=1
+# Data: control(1B), position(4B), velocity(4B), accel(4B)
+```
+
+**Test Parameters:**
+- SCALE = 2000.0 counts/mm
+- Test move: 1.0 mm (2000 counts)
+- Monitor rate: 10 Hz for 2 seconds
 
 ---
 
